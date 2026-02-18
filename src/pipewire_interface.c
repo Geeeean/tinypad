@@ -57,9 +57,13 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 
     if (info->change_mask & PW_NODE_CHANGE_MASK_PROPS && info->props) {
         const char *desc = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION);
-        if (!desc) {
+        if (!desc)
+            desc = spa_dict_lookup(info->props, PW_KEY_NODE_NICK);
+        if (!desc)
+            desc = spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME);
+        if (!desc)
             desc = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
-        }
+
         if (desc) {
             state_update_name(node->id, desc);
         } else {
