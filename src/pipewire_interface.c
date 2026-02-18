@@ -199,7 +199,7 @@ static const struct pw_registry_events registry_events = {
     .global_remove = registry_event_global_remove,
 };
 
-void pipewire_interface_init(int argc, char *argv[])
+void *pipewire_interface_loop(void *args)
 {
     struct pw_main_loop *loop;
     struct pw_context *context;
@@ -207,7 +207,7 @@ void pipewire_interface_init(int argc, char *argv[])
     struct pw_registry *registry;
     struct spa_hook registry_listener;
 
-    pw_init(&argc, &argv);
+    pw_init(NULL, NULL);
 
     loop = pw_main_loop_new(NULL /* properties */);
     context = pw_context_new(pw_main_loop_get_loop(loop), NULL /* properties */,
@@ -226,4 +226,12 @@ void pipewire_interface_init(int argc, char *argv[])
     pw_core_disconnect(core);
     pw_context_destroy(context);
     pw_main_loop_destroy(loop);
+}
+
+void pipewire_loop_spawn()
+{
+    pthread_t pipewire_t;
+
+    // Creating a new thread
+    pthread_create(&pipewire_t, NULL, pipewire_interface_loop, NULL);
 }

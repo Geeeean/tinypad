@@ -32,8 +32,7 @@ typedef struct {
 extern MixerState shared_state;
 
 void state_init(void);
-// this function IS NOT thread safe, only use inside lock
-int32_t get_node_index(uint32_t id);
+int32_t get_node_index(uint32_t id); // this function IS NOT thread safe, only use inside lock
 int32_t get_node_index_thread_safe(uint32_t id);
 uint8_t state_add_node(uint32_t id, const char *name, const char *class);
 uint8_t state_remove_node(uint32_t id);
