@@ -14,7 +14,7 @@ typedef struct {
     char name[128];
     char class[64];
 
-    /* lock-free updates of audio levels */
+    // lock-free updates of audio levels
     _Atomic float volume;
     _Atomic float peak;
 
@@ -28,12 +28,16 @@ typedef struct {
     pthread_mutex_t lock;
 } MixerState;
 
-/* Global state instance */
+// global state instance
 extern MixerState shared_state;
 
 void state_init(void);
-void state_add_node(uint32_t id, const char *name, const char *class);
-void state_remove_node(uint32_t id);
-void state_update_peak(uint32_t id, float peak_value);
+// this function IS NOT thread safe, only use inside lock
+int32_t get_node_index(uint32_t id);
+int32_t get_node_index_thread_safe(uint32_t id);
+uint8_t state_add_node(uint32_t id, const char *name, const char *class);
+uint8_t state_remove_node(uint32_t id);
+uint8_t state_update_peak(uint32_t id, float peak_value);
+uint8_t state_update_name(uint32_t id, const char *name);
 
 #endif
