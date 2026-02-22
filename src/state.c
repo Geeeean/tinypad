@@ -1,5 +1,6 @@
 #include "state.h"
 #include "common.h"
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,6 +15,8 @@ uint8_t state_init(void)
     if (!shared_state.zmq_ctx) {
         return FAILURE;
     }
+
+    atomic_store(&shared_state.is_ready, false);
 
     for (int i = 0; i < MAX_NODES; i++) {
         shared_state.nodes[i].active = false;

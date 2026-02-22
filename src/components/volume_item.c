@@ -1,6 +1,7 @@
 #include "components/volume_item.h"
 #include "command.h"
 #include "components/style.h"
+#include <raylib.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -45,5 +46,5 @@ void DrawVolumeItem(Rectangle props, float volume, uint32_t node_id,
     fill_props.width = (int)(volume * props.width);
 
     // fill
-    DrawRectangleRounded(fill_props, 0.8f, 20, WHITE);
+    DrawRectangleRounded(fill_props, 0.8f, 20, ITEM_FOREGROUND);
 }

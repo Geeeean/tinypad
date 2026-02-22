@@ -35,10 +35,16 @@ static void on_process(void *data)
     uint32_t n_samples = d->chunk->size / sizeof(float);
 
     float peak = 0.0f;
+    float min = 1.0f;
     for (uint32_t i = 0; i < n_samples; i++) {
         float s = fabsf(samples[i]);
-        if (s > peak)
+        if (s > peak) {
             peak = s;
+        }
+
+        if (s < min) {
+            min = s;
+        }
     }
 
     node->peak_accum = fmaxf(node->peak_accum, peak);
@@ -46,7 +52,7 @@ static void on_process(void *data)
 
     if (node->peak_counter >= 10) {
         atomic_store(&node->peak, node->peak_accum);
-        printf("PEAK %f\n", peak);
+        printf("PEAK %f, MIN %f\n", peak, min);
         node->peak_accum = 0.0f;
         node->peak_counter = 0;
     }
@@ -57,11 +63,6 @@ static void on_process(void *data)
 static const struct pw_stream_events meter_events = {
     PW_VERSION_STREAM_EVENTS,
     .process = on_process,
-};
-
-struct roundtrip_data {
-    int pending;
-    struct pw_thread_loop *loop;
 };
 
 void apply_node_volume(struct pw_node *proxy, float volume)
@@ -87,12 +88,20 @@ void apply_node_volume(struct pw_node *proxy, float volume)
     pw_node_set_param(proxy, SPA_PARAM_Props, 0, param);
 }
 
+struct roundtrip_data {
+    struct pw_thread_loop *loop;
+    int pending;
+    bool done;
+};
+
 static void on_core_done(void *data, uint32_t id, int seq)
 {
     struct roundtrip_data *d = data;
 
     if (id == PW_ID_CORE && seq == d->pending) {
-        // pw_main_loop_quit(d->loop);
+        d->done = true;
+        // Signal the thread loop to wake up pw_thread_loop_wait
+        pw_thread_loop_signal(d->loop, false);
     }
 }
 
@@ -103,19 +112,28 @@ static void roundtrip(struct pw_core *core, struct pw_thread_loop *loop)
         .done = on_core_done,
     };
 
-    struct roundtrip_data d = {.loop = loop};
+    struct roundtrip_data d = {.loop = loop, .done = false};
     struct spa_hook core_listener;
-    int err;
+
+    // 1. Lock the thread loop before interacting with the core
+    pw_thread_loop_lock(loop);
 
     pw_core_add_listener(core, &core_listener, &core_events, &d);
-
     d.pending = pw_core_sync(core, PW_ID_CORE, 0);
 
-    if ((err = pw_thread_loop_start(loop)) < 0) {
-        // todo log error
+    // 3. Wait until d.done becomes true
+    // This releases the lock internally and re-acquires it when signaled
+    while (!d.done) {
+        pw_thread_loop_wait(loop);
     }
 
+    // 4. Cleanup
     spa_hook_remove(&core_listener);
+
+    // 5. Unlock
+    pw_thread_loop_unlock(loop);
+
+    atomic_store(&shared_state.is_ready, true);
 }
 
 static void node_event_info(void *data, const struct pw_node_info *info)
@@ -263,12 +281,19 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
                 const struct spa_pod *params[1];
                 params[0] = spa_format_audio_raw_build(
                     &b, SPA_PARAM_EnumFormat,
-                    &SPA_AUDIO_INFO_RAW_INIT(.format = SPA_AUDIO_FORMAT_F32));
+                    &SPA_AUDIO_INFO_RAW_INIT(.format = SPA_AUDIO_FORMAT_F32,
+                                             .rate = 48000, .channels = 2,
+                                             .position = {SPA_AUDIO_CHANNEL_FL,
+                                                          SPA_AUDIO_CHANNEL_FR}
+
+                                             ));
 
                 struct pw_stream *meter_stream = pw_stream_new(
                     ctx->core, "peak_meter",
                     pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
-                                      "Capture", PW_KEY_MEDIA_ROLE, "DSP", NULL));
+                                      "Capture", PW_KEY_MEDIA_ROLE, "DSP",
+                                      "stream.dont-remix", "true", "channelmix.upmix",
+                                      "false", "channelmix.normalize", "false", NULL));
 
                 pw_stream_add_listener(meter_stream,
                                        &shared_state.nodes[idx].meter_listener,
@@ -317,6 +342,8 @@ void *pipewire_interface_loop(void *args)
                              0 /* user_data size */);
 
     core = pw_context_connect(context, NULL /* properties */, 0 /* user_data size */);
+
+    pw_thread_loop_start(loop);
 
     registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0 /* user_data size */);
 

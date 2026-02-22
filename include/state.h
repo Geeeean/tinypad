@@ -34,6 +34,8 @@ typedef struct {
     AudioNode nodes[MAX_NODES];
     pthread_mutex_t lock;
 
+    _Atomic bool is_ready;
+
     void *zmq_ctx;
 } MixerState;
 
