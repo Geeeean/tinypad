@@ -1,4 +1,5 @@
 #include "pipewire_interface.h"
+#include "command.h"
 #include "spa/pod/pod.h"
 #include "spa/utils/dict.h"
 #include "state.h"
@@ -7,14 +8,84 @@
 #include <pthread.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
+#include <spa/pod/builder.h>
 #include <spa/pod/iter.h>
 #include <stdatomic.h>
 #include <stdio.h>
 
+struct pw_context_data {
+    struct pw_core *core;
+    struct pw_registry *registry;
+};
+
+static void on_process(void *data)
+{
+    AudioNode *node = data;
+    struct pw_buffer *buf = pw_stream_dequeue_buffer(node->meter_stream);
+    if (!buf)
+        return;
+
+    struct spa_data *d = &buf->buffer->datas[0];
+    if (!d->data || d->chunk->size == 0) {
+        pw_stream_queue_buffer(node->meter_stream, buf);
+        return;
+    }
+
+    float *samples = d->data;
+    uint32_t n_samples = d->chunk->size / sizeof(float);
+
+    float peak = 0.0f;
+    for (uint32_t i = 0; i < n_samples; i++) {
+        float s = fabsf(samples[i]);
+        if (s > peak)
+            peak = s;
+    }
+
+    node->peak_accum = fmaxf(node->peak_accum, peak);
+    node->peak_counter++;
+
+    if (node->peak_counter >= 10) {
+        atomic_store(&node->peak, node->peak_accum);
+        printf("PEAK %f\n", peak);
+        node->peak_accum = 0.0f;
+        node->peak_counter = 0;
+    }
+
+    pw_stream_queue_buffer(node->meter_stream, buf);
+}
+
+static const struct pw_stream_events meter_events = {
+    PW_VERSION_STREAM_EVENTS,
+    .process = on_process,
+};
+
 struct roundtrip_data {
     int pending;
-    struct pw_main_loop *loop;
+    struct pw_thread_loop *loop;
 };
+
+void apply_node_volume(struct pw_node *proxy, float volume)
+{
+    if (!proxy) {
+        return;
+    }
+
+    uint8_t buffer[1024];
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+    struct spa_pod_frame f;
+
+    spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
+
+    spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
+    float vol = powf(volume, 3.0);
+    spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float, 1, &vol);
+
+    spa_pod_builder_prop(&b, SPA_PROP_mute, 0);
+    spa_pod_builder_bool(&b, false);
+
+    struct spa_pod *param = spa_pod_builder_pop(&b, &f);
+    pw_node_set_param(proxy, SPA_PARAM_Props, 0, param);
+}
 
 static void on_core_done(void *data, uint32_t id, int seq)
 {
@@ -25,7 +96,7 @@ static void on_core_done(void *data, uint32_t id, int seq)
     }
 }
 
-static void roundtrip(struct pw_core *core, struct pw_main_loop *loop)
+static void roundtrip(struct pw_core *core, struct pw_thread_loop *loop)
 {
     static const struct pw_core_events core_events = {
         PW_VERSION_CORE_EVENTS,
@@ -40,7 +111,7 @@ static void roundtrip(struct pw_core *core, struct pw_main_loop *loop)
 
     d.pending = pw_core_sync(core, PW_ID_CORE, 0);
 
-    if ((err = pw_main_loop_run(loop)) < 0) {
+    if ((err = pw_thread_loop_start(loop)) < 0) {
         // todo log error
     }
 
@@ -156,7 +227,8 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
         return;
     }
 
-    struct pw_registry *registry = data;
+    struct pw_context_data *ctx = data;
+    struct pw_registry *registry = ctx->registry;
 
     if (strcmp(class, "Stream/Output/Audio") == 0 || strcmp(class, "Audio/Sink") == 0) {
         const char *display_name = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
@@ -185,6 +257,28 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
                    so the callback knows which node is talking */
                 pw_node_add_listener(proxy, &shared_state.nodes[idx].listener,
                                      &node_events, &shared_state.nodes[idx]);
+
+                uint8_t buffer[1024];
+                struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+                const struct spa_pod *params[1];
+                params[0] = spa_format_audio_raw_build(
+                    &b, SPA_PARAM_EnumFormat,
+                    &SPA_AUDIO_INFO_RAW_INIT(.format = SPA_AUDIO_FORMAT_F32));
+
+                struct pw_stream *meter_stream = pw_stream_new(
+                    ctx->core, "peak_meter",
+                    pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
+                                      "Capture", PW_KEY_MEDIA_ROLE, "DSP", NULL));
+
+                pw_stream_add_listener(meter_stream,
+                                       &shared_state.nodes[idx].meter_listener,
+                                       &meter_events, &shared_state.nodes[idx]);
+
+                pw_stream_connect(meter_stream, PW_DIRECTION_INPUT, id,
+                                  PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_RT_PROCESS,
+                                  params, 1);
+
+                shared_state.nodes[idx].meter_stream = meter_stream;
             }
             pthread_mutex_unlock(&shared_state.lock);
         }
@@ -205,7 +299,12 @@ static const struct pw_registry_events registry_events = {
 
 void *pipewire_interface_loop(void *args)
 {
-    struct pw_main_loop *loop;
+    ZmqConnection zmq = command_connection_init_audio();
+    if (!zmq.is_active) {
+        return NULL;
+    }
+
+    struct pw_thread_loop *loop;
     struct pw_context *context;
     struct pw_core *core;
     struct pw_registry *registry;
@@ -213,23 +312,47 @@ void *pipewire_interface_loop(void *args)
 
     pw_init(NULL, NULL);
 
-    loop = pw_main_loop_new(NULL /* properties */);
-    context = pw_context_new(pw_main_loop_get_loop(loop), NULL /* properties */,
+    loop = pw_thread_loop_new("velvet_pipewire_loop", NULL /* properties */);
+    context = pw_context_new(pw_thread_loop_get_loop(loop), NULL /* properties */,
                              0 /* user_data size */);
 
     core = pw_context_connect(context, NULL /* properties */, 0 /* user_data size */);
 
     registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0 /* user_data size */);
 
-    pw_registry_add_listener(registry, &registry_listener, &registry_events, registry);
+    struct pw_context_data ctx = {.registry = registry, .core = core};
+    pw_registry_add_listener(registry, &registry_listener, &registry_events, &ctx);
 
     roundtrip(core, loop);
-    // pw_main_loop_run(loop);
+
+    Command cmd;
+    while (true) {
+        if (command_recv_blocking(zmq, &cmd) > 0) {
+            pw_thread_loop_lock(loop);
+
+            struct pw_node *target_proxy = NULL;
+            for (int i = 0; i < MAX_NODES; i++) {
+                if (shared_state.nodes[i].active &&
+                    shared_state.nodes[i].id == cmd.node_id) {
+                    target_proxy = (struct pw_node *)shared_state.nodes[i].proxy;
+                    break;
+                }
+            }
+
+            if (cmd.type == CMD_SET_VOLUME) {
+                apply_node_volume(target_proxy, cmd.value);
+            }
+
+            pw_thread_loop_unlock(loop);
+        }
+    }
 
     pw_proxy_destroy((struct pw_proxy *)registry);
     pw_core_disconnect(core);
     pw_context_destroy(context);
-    pw_main_loop_destroy(loop);
+    pw_thread_loop_destroy(loop);
+
+    return NULL;
 }
 
 void pipewire_loop_spawn()

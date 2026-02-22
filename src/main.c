@@ -1,5 +1,9 @@
+#include "common.h"
 #include "pipewire_interface.h"
+#include "state.h"
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #ifdef _WIN32
 
 #elif defined(__linux__)
@@ -16,6 +20,10 @@
 
 int main(int argc, char *argv[])
 {
+    if (state_init()) {
+        exit(FAILURE);
+    }
+
 #ifdef _WIN32
 #elif defined(__linux__)
     pipewire_loop_spawn();
@@ -25,5 +33,5 @@ int main(int argc, char *argv[])
 
     gui_init();
 
-    return 0;
+    return SUCCESS;
 }

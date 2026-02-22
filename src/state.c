@@ -3,15 +3,23 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <zmq.h>
 
 MixerState shared_state;
 
-void state_init(void)
+uint8_t state_init(void)
 {
     pthread_mutex_init(&shared_state.lock, NULL);
+    shared_state.zmq_ctx = zmq_ctx_new();
+    if (!shared_state.zmq_ctx) {
+        return FAILURE;
+    }
+
     for (int i = 0; i < MAX_NODES; i++) {
         shared_state.nodes[i].active = false;
     }
+
+    return SUCCESS;
 }
 
 uint8_t state_add_node(uint32_t id, const char *name, const char *class)
