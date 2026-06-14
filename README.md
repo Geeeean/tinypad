@@ -8,13 +8,13 @@ Velvet is a custom macro pad and audio mixer controller built around the ESP32-S
 
 ## PCB Development — 35%
 
-A custom board designed around the ESP32-S3. Currently still in a dev board phase, with layout and design rules not fully optimized. A rerouting pass is planned to fix annular ring sizes, differential pair length matching and trace distances.
+A custom board designed around the ESP32-S3. Currently still in a dev board phase, with layout and design rules not fully optimized. A rerouting pass is planned to fix annular ring sizes, differential pair length matching, and trace distances.
 
-**Front**
-![PCB Front](images/velvet_front.png)
-
-**Back**
-![PCB Back](images/velvet_back.png)
+<p>
+  <img src="images/velvet_front.png" width="48%" alt="PCB Front"/>
+  &nbsp;
+  <img src="images/velvet_back.png" width="48%" alt="PCB Back"/>
+</p>
 
 **To do:**
 - Reroute with correct DRC constraints
