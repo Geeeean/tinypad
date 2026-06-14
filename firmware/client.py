@@ -3,8 +3,30 @@ import time
 import struct
 import random
 
+import math
+
+BASE      = 50     # media attorno a cui oscilla
+AMPLITUDE = 40     # quanto si allontana dalla media (qui 10..90)
+FREQ      = 0.5    # Hz: oscillazioni al secondo (0.5 = un ciclo ogni 2s)
+
+start_time = time.time()
+
+GLOBAL_AMP = 30   # parte comune -> muove il master/RMS
+LOCAL_AMP  = 15   # parte per-canale -> differenzia i canali
+
+def generate_musical_channels():
+    t = time.time() - start_time
+    global_wave = math.cos(2 * math.pi * FREQ * t)              # uguale per tutti
+    channels = []
+    for ch in range(NUM_CHANNELS):
+        phase = ch * (2 * math.pi / NUM_CHANNELS)
+        local = math.cos(2 * math.pi * FREQ * 1.7 * t + phase)  # diverso per canale
+        val = BASE + GLOBAL_AMP * global_wave + LOCAL_AMP * local
+        channels.append(int(max(0, min(100, val))))
+    return channels
+
 # SERIAL CONFIGURATION
-SERIAL_PORT = '/dev/cu.usbmodemVM0011' 
+SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
 START_BYTE = 0xA5
 NUM_CHANNELS = 5

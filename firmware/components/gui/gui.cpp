@@ -1,30 +1,32 @@
 #include "gui.hpp"
 #include "display.hpp"
 #include "esp_log.h"
+#include "lgfx/v1/misc/colortype.hpp"
 #include "lgfx/v1/misc/enum.hpp"
 #include "protocol.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iomanip>
 #include <random>
 #include <sstream>
 #include <string>
 
-#define PADDING 5
+#define PADDING 12
 #define PADDING_INNER 5
 #define BORDER_WIDTH 1
 
 static const char *TAG = "GUI";
-static constexpr int AUDIO_GRAPH_SAMPLES = 233;
+static constexpr int AUDIO_GRAPH_SAMPLES = 250;
 static uint8_t audio_history[AUDIO_GRAPH_SAMPLES] = {0};
 
 void GUI::init(USBManager::Config config)
 {
     _config = config;
 
-    // Initialize shared data structure to zero safely on startup
+    
     if (_config.shared_data != nullptr) {
         std::memset(_config.shared_data, 0, sizeof(mixer_data_in));
     }
@@ -34,11 +36,10 @@ void GUI::start()
 {
     ESP_LOGI(TAG, "Launching GUI Component thread...");
 
-    // Pass 'this' as the parameter so the static task can find our configuration data
     BaseType_t ret = xTaskCreatePinnedToCore(GUI::gui_task, "gui_task", 8192,
-                                             this, // <--- Passing the instance pointer
+                                             this,
                                              1, nullptr,
-                                             1 // Core 1
+                                             1 
     );
 
     if (ret != pdPASS) {
@@ -53,7 +54,7 @@ int get_smoothed_master_volume(const unsigned char *volumes, int channels,
         return 0;
     }
 
-    // 1. Calculate Root Mean Square (RMS) for energy distribution
+    
     float sum_squares = 0.0f;
     for (int i = 0; i < channels; i++) {
         float vol = static_cast<float>(volumes[i]);
@@ -61,18 +62,18 @@ int get_smoothed_master_volume(const unsigned char *volumes, int channels,
     }
     float rms_volume = std::sqrt(sum_squares / channels);
 
-    // 2. Apply ballistic physics response filter
+    
     float alpha;
     if (rms_volume > smoothed_volume) {
-        alpha = 0.40f; // Fast attack: responds immediately to audio peaks
+        alpha = 0.40f; 
     } else {
-        alpha = 0.08f; // Slow release: smooth analog-like decay, prevents flickering
+        alpha = 0.08f; 
     }
 
-    // Interpolate towards the target volume
+    
     smoothed_volume = smoothed_volume + alpha * (rms_volume - smoothed_volume);
 
-    // 3. Clamp and cast to final integer between 0 and 100
+    
     int final_volume = static_cast<int>(std::round(smoothed_volume));
     return std::max(0, std::min(100, final_volume));
 }
@@ -81,7 +82,7 @@ void GUI::gui_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "GUI Task running on Core 1.");
 
-    // Recover the C++ class instance context
+    
     GUI *instance = static_cast<GUI *>(pvParameters);
 
     auto &tft = Display::get_device();
@@ -90,22 +91,27 @@ void GUI::gui_task(void *pvParameters)
     int w = tft.width();
     int h = tft.height();
 
+    int unit = (w - BORDER_WIDTH * 6 - PADDING * 2) / MIXER_CHANNELS;
+
     canvas.setFont(&fonts::efontCN_12);
     canvas.setColorDepth(lgfx::rgb565_2Byte);
+    canvas.setPsram(false);
     canvas.createSprite(w, h);
 
-    bool is_woke_up = false;
+    bool is_woke_up = true;
 
     float smoothed_volume = 0.0f;
+
+    int i = 0;
 
     while (true) {
         mixer_data_in local_data = {0};
 
-        // Extract pointers out from our class-level configuration profile safely
+        
         SemaphoreHandle_t mtx = instance->_config.mutex;
         mixer_data_in *shared = instance->_config.shared_data;
 
-        // Take snapshot copy
+        
         if (mtx != nullptr && shared != nullptr &&
             xSemaphoreTake(mtx, pdMS_TO_TICKS(2)) == pdTRUE) {
             local_data = *shared;
@@ -136,378 +142,303 @@ void GUI::gui_task(void *pvParameters)
             for (int i = 0; i < AUDIO_GRAPH_SAMPLES - 1; i++) {
                 audio_history[i] = audio_history[i + 1];
             }
-            // audio_history[AUDIO_GRAPH_SAMPLES - 1] = *std::max_element(
-            //     local_data.volumes, local_data.volumes + MIXER_CHANNELS);
+            
+            
             audio_history[AUDIO_GRAPH_SAMPLES - 1] = get_smoothed_master_volume(
                 local_data.volumes, MIXER_CHANNELS, smoothed_volume);
 
             canvas.fillScreen(TFT_BLACK);
-
-            // Call the member drawing functions using the instance pointer
-            instance->draw_top_bar(canvas);
+            instance->draw_audio_waveform(canvas, unit);
+            instance->draw_macro_label(canvas, unit);
             instance->draw_vu_meters(canvas, local_data.volumes);
-            instance->draw_system_stats(canvas);
-            instance->draw_audio_waveform(canvas);
-
-            // Frame outer border boundaries
-            canvas.drawFastHLine(PADDING, PADDING, w - PADDING * 2, TFT_SILVER);
-            canvas.drawFastHLine(PADDING, h - PADDING - 1, w - PADDING * 2, TFT_SILVER);
-            canvas.drawFastVLine(PADDING, PADDING, h - PADDING * 2, TFT_SILVER);
-            canvas.drawFastVLine(w - PADDING - 1, PADDING, h - PADDING * 2, TFT_SILVER);
         }
 
-        // tft.startWrite();
+        i = (i + 1) % 3;
+
+        tft.startWrite();
         canvas.pushSprite(&tft, 0, 0);
         tft.waitDMA();
-        // tft.endWrite();
+        tft.endWrite();
 
-        vTaskDelay(pdMS_TO_TICKS(66));
+        vTaskDelay(pdMS_TO_TICKS(33));
     }
 }
 
-// Note: These are now normal member functions! No static prefix needed here.
-void GUI::draw_top_bar(lgfx::LGFX_Sprite &canvas)
+void GUI::draw_top_bar(lgfx::LGFX_Sprite &canvas, int unit)
 {
-    int w = canvas.width();
-    canvas.setTextSize(1);
-    canvas.setTextColor(TFT_SILVER, TFT_BLACK);
-    canvas.setTextDatum(TL_DATUM);
+    const int w  = canvas.width();
+    const int cy = 15;                 
+    const int box_h     = 14;
+    const int box_gap   = 6;
+    const int inner_pad = 5;
+    const int circle_r   = 3;
+    const int circle_gap = 4;
 
-    canvas.drawString("[OUT] HEADPHONE", PADDING + BORDER_WIDTH + PADDING_INNER,
-                      PADDING + BORDER_WIDTH + PADDING_INNER);
+    const int text_col   = TFT_GRAY;
+    const int box_border = canvas.color565(40, 40, 40);
+    const int live_green = canvas.color565(0, 200, 80);
 
-    std::string time_str = "[TIME] 19.30";
-    int time_str_w = canvas.textWidth(time_str.c_str());
-    canvas.drawString(time_str.c_str(),
-                      w - PADDING - BORDER_WIDTH - PADDING_INNER - time_str_w,
-                      PADDING + BORDER_WIDTH + PADDING_INNER);
+    
+    canvas.setFont(&fonts::efontCN_12_b);
+    canvas.setTextSize(1.0f);
+    canvas.setTextColor(TFT_SILVER);
+    canvas.setTextDatum(lgfx::textdatum_t::middle_left);
+    canvas.drawString("VELVET", PADDING, cy);
 
-    canvas.drawFastVLine(
-        w - PADDING - BORDER_WIDTH - PADDING_INNER - time_str_w - PADDING_INNER - 1,
-        PADDING, canvas.fontHeight() + PADDING_INNER * 2 + 1, TFT_SILVER);
-    canvas.drawFastHLine(PADDING,
-                         PADDING + BORDER_WIDTH + PADDING_INNER * 2 + canvas.fontHeight(),
-                         w - PADDING * 2, TFT_SILVER);
-}
+    
+    canvas.setFont(&fonts::efontCN_12);
+    canvas.setTextColor(text_col);
+    canvas.setTextDatum(lgfx::textdatum_t::middle_right);
+    std::string clock_str = "12:34";   
+    canvas.drawString(clock_str.c_str(), w - PADDING, cy);
 
-/*
-void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, uint8_t *volumes)
-{
-    const char *channel_names[5] = {"SYSTEM", "DISCRD", "SPOTFY", "GAMING", "BROWSR"};
+    
+    int cpu = 0, ram = 0;              
+    std::string cpu_str  = "CPU " + std::to_string(cpu) + "%";
+    std::string ram_str  = "RAM " + std::to_string(ram) + "%";
+    std::string live_str = "LIVE";
 
-    int w = canvas.width();
-    int h = canvas.height();
+    
+    int cpu_w  = canvas.textWidth(cpu_str.c_str())  + 2 * inner_pad;
+    int ram_w  = canvas.textWidth(ram_str.c_str())  + 2 * inner_pad;
+    int live_w = circle_r * 2 + circle_gap + canvas.textWidth(live_str.c_str()) + 2 * inner_pad;
 
-    int channel_h =
-        h - PADDING * 2 - BORDER_WIDTH * 4 - canvas.fontHeight() * 3 - PADDING_INNER * 6;
-    int total_available_w = w - (PADDING * 2);
-    int channel_w = total_available_w / 5;
+    int group_w = cpu_w + ram_w + live_w + 2 * box_gap;
+    int x = (w - group_w) / 2;          
 
-    int fixed_bar_h = int((channel_h - PADDING_INNER * 4) * 0.8);
-
-    for (int i = 0; i < MIXER_CHANNELS; i++) {
-        int left = PADDING + (channel_w * i);
-        int top = PADDING + BORDER_WIDTH * 2 + canvas.fontHeight() + PADDING_INNER * 2;
-
-        if (i > 0) {
-            canvas.drawFastVLine(left, top, channel_h, TFT_SILVER);
+    auto draw_box = [&](int bx, int bw, const std::string &s, bool live) {
+        canvas.drawRect(bx, cy - box_h / 2, bw, box_h, box_border);   
+        int tx = bx + inner_pad;
+        if (live) {
+            int ccx = bx + inner_pad + circle_r;
+            canvas.fillSmoothCircle(ccx, cy, circle_r, live_green);
+            tx = ccx + circle_r + circle_gap;
         }
+        canvas.setTextColor(text_col);
+        canvas.setTextDatum(lgfx::textdatum_t::middle_left);
+        canvas.drawString(s.c_str(), tx, cy);
+    };
 
-        const int GAP = 4;
+    draw_box(x, cpu_w,  cpu_str,  false); x += cpu_w  + box_gap;
+    draw_box(x, ram_w,  ram_str,  false); x += ram_w  + box_gap;
+    draw_box(x, live_w, live_str, true);
 
-        int line_offset = (i > 0) ? 1 : 0;
-
-        int available_w = channel_w - (PADDING_INNER * 2) - line_offset;
-        int stereo_w = (available_w - GAP) / 2;
-
-        int active_bar_h = int(fixed_bar_h * volumes[i] / 100);
-
-        canvas.drawRect(left + PADDING_INNER + line_offset, top + PADDING_INNER, stereo_w,
-                        fixed_bar_h, TFT_DARKGRAY);
-
-        // Right Channel Bar
-        canvas.drawRect(left + PADDING_INNER + line_offset + stereo_w + GAP,
-                        top + PADDING_INNER, stereo_w, fixed_bar_h, TFT_DARKGREY);
-
-        // Left Channel Bar
-        canvas.fillRect(left + PADDING_INNER + line_offset,
-                        top + PADDING_INNER + fixed_bar_h - active_bar_h, stereo_w,
-                        active_bar_h, TFT_SILVER);
-
-        // Right Channel Bar
-        canvas.fillRect(left + PADDING_INNER + line_offset + stereo_w + GAP,
-                        top + PADDING_INNER + fixed_bar_h - active_bar_h, stereo_w,
-                        active_bar_h, TFT_SILVER);
-
-        top += PADDING_INNER + fixed_bar_h;
-
-        int str_w = canvas.textWidth(channel_names[i]);
-        canvas.drawString(channel_names[i], left + int((channel_w - str_w) / 2),
-                          top + PADDING_INNER);
-
-        top += canvas.fontHeight() + PADDING_INNER;
-
-        float mix_volume = 75.0 / 100.0;
-        str_w = canvas.textWidth("75%");
-
-        canvas.drawString("75%", left + int((channel_w - str_w) / 2), top);
-
-        top += canvas.fontHeight();
-
-        canvas.drawRect(left + PADDING_INNER, top + 2, channel_w - PADDING_INNER * 2, 6,
-                        TFT_SILVER);
-        canvas.fillRect(left + PADDING_INNER, top + 2,
-                        int(mix_volume * (channel_w - PADDING_INNER * 2)), 6, TFT_SILVER);
-
-        // canvas.drawRect(left + PADDING_INNER * 2 + str_w, top + PADDING_INNER,
-        //                 10, canvas.fontHeight(),
-        //                 TFT_SILVER);
-    }
+    canvas.setTextDatum(lgfx::textdatum_t::top_left);
 }
 
 
 void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, uint8_t *volumes)
 {
-    const char *channel_names[5] = {"SYSTEM", "DISCRD", "SPOTFY", "GAMING", "BROWSR"};
+    static float disp_level[MIXER_CHANNELS][2] = {{0}};
 
-    int w = canvas.width();
-    int h = canvas.height();
+    const int w = canvas.width();
+    const int count = MIXER_CHANNELS;
+    const int sub_ch = 2;
+    const int col_gap = 8;
+    const int sub_gap = 2;
 
-    int channel_h =
-        h - PADDING * 2 - BORDER_WIDTH * 4 - canvas.fontHeight() * 3 - PADDING_INNER * 6;
-    int total_available_w = w - (PADDING * 2);
-    int channel_w = total_available_w / 5;
+    const int bars_top = 12; 
+    const int bars_base = 110;    
+    const int bar_h_max = bars_base - bars_top;
 
-    int fixed_bar_h = int((channel_h - PADDING_INNER * 4) * 0.8);
+    const int seg_count = 16; 
+    const int seg_gap = 1;
+    const int seg_h = (bar_h_max - (seg_count - 1) * seg_gap) / seg_count;
 
-    for (int i = 0; i < MIXER_CHANNELS; i++) {
-        int left = PADDING + (channel_w * i);
-        int top = PADDING + BORDER_WIDTH * 2 + canvas.fontHeight() + PADDING_INNER * 2;
+    const int vol_bar_y = 114; 
+    const int vol_bar_h = 5;
+    const int text_y = 122; 
 
-        if (i > 0) {
-            canvas.drawFastVLine(left, top, channel_h, TFT_SILVER);
-        }
+    const int track_color = canvas.color565(40, 40, 40);
+    const int green = canvas.color565(0, 200, 80);
+    const int orange = canvas.color565(240, 140, 0);
+    const int red = canvas.color565(230, 40, 40);
+    const int vol_fill = TFT_GRAY;
+    const int text_col = TFT_GRAY;
 
-        const int GAP = 4;
-        int line_offset = (i > 0) ? 1 : 0;
+    const float up_step = 22.0f;
+    const float down_step = 8.0f;
 
-        int available_w = channel_w - (PADDING_INNER * 2) - line_offset;
-        int stereo_w = (available_w - GAP) / 2;
+    
+    const float green_max = 0.50f;
+    const float orange_max = 0.70f; 
 
-        int active_bar_h = int(fixed_bar_h * volumes[i] / 100);
+    const char *names[MIXER_CHANNELS] = {"GAME", "CHAT", "MUSIC", "BROW", "SYS"};
+    const int set_vol = 50;
 
-        // --- 1. CANCELLAZIONE CHIRURGICA DEI RESIDUI FANTASMA ---
-        // Calcoliamo l'altezza dello spazio vuoto sopra la barra del volume corrente
-        int empty_space_h = fixed_bar_h - active_bar_h;
-        if (empty_space_h > 0) {
-            // Puliamo con il colore di sfondo (TFT_BLACK) l'area interna non occupata dal volume
-            canvas.fillRect(left + PADDING_INNER + line_offset + 1, 
-                            top + PADDING_INNER + 1, 
-                            stereo_w - 2, empty_space_h, TFT_BLACK);
-            
-            canvas.fillRect(left + PADDING_INNER + line_offset + stereo_w + GAP + 1, 
-                            top + PADDING_INNER + 1, 
-                            stereo_w - 2, empty_space_h, TFT_BLACK);
-        }
+    const int avail = w - 2 * PADDING - (count - 1) * col_gap;
+    const int col_w = avail / count;
+    const int bar_w = (col_w - sub_gap) / 2;
 
-        // --- 2. DISEGNO DEL CONTORNO (drawRect) ---
-        canvas.drawRect(left + PADDING_INNER + line_offset, top + PADDING_INNER, stereo_w,
-                        fixed_bar_h, TFT_DARKGRAY);
+    canvas.setFont(&fonts::efontCN_12);
+    canvas.setTextSize(1.0f);
 
-        // Right Channel Bar Outline
-        canvas.drawRect(left + PADDING_INNER + line_offset + stereo_w + GAP,
-                        top + PADDING_INNER, stereo_w, fixed_bar_h, TFT_DARKGRAY);
+    for (int i = 0; i < count; i++) {
+        int col_x = PADDING + i * (col_w + col_gap);
 
-        // --- 3. DISEGNO DELLE BARRE ATTIVE (Ancorate dentro al contorno) ---
-        if (active_bar_h > 0) {
-            // Left Channel Fill
-            canvas.fillRect(left + PADDING_INNER + line_offset + 1,
-                            top + PADDING_INNER + fixed_bar_h - active_bar_h, stereo_w - 2,
-                            active_bar_h, TFT_SILVER);
-
-            // Right Channel Fill
-            canvas.fillRect(left + PADDING_INNER + line_offset + stereo_w + GAP + 1,
-                            top + PADDING_INNER + fixed_bar_h - active_bar_h, stereo_w - 2,
-                            active_bar_h, TFT_SILVER);
-        }
-
-        // --- 4. DISEGNO TESTO E INTERFACCIA INFERIORE ---
-        top += PADDING_INNER + fixed_bar_h;
-
-        int str_w = canvas.textWidth(channel_names[i]);
-        canvas.drawString(channel_names[i], left + int((channel_w - str_w) / 2),
-                          top + PADDING_INNER);
-
-        top += canvas.fontHeight() + PADDING_INNER;
-
-        float mix_volume = 75.0f / 100.0f; // Forzata divisione in float float-literal
-        str_w = canvas.textWidth("75%");
-
-        canvas.drawString("75%", left + int((channel_w - str_w) / 2), top);
-
-        top += canvas.fontHeight();
-
-        int total_bar_w = channel_w - PADDING_INNER * 2;
         
-        // Disegna la barra inferiore fissa al 75% correttamente campionata
-        canvas.drawRect(left + PADDING_INNER, top + 2, total_bar_w, 6, TFT_SILVER);
+        for (int c = 0; c < sub_ch; c++) {
+            int bx = col_x + c * (bar_w + sub_gap);
+
+            float target = volumes[i];
+            if (target > 100)
+                target = 100;
+
+            float &lv = disp_level[i][c];
+            if (target > lv)
+                lv = std::min(target, lv + up_step);
+            else
+                lv = std::max(target, lv - down_step);
+
+            int lit = (int)(lv * seg_count / 100.0f);
+
+            for (int s = 0; s < seg_count; s++) {
+                int sy = bars_base - (s + 1) * seg_h - s * seg_gap;
+                int col;
+                if (s < lit) {
+                    float frac = (s + 1) / (float)seg_count;
+                    col = (frac <= green_max)    ? green
+                          : (frac <= orange_max) ? orange
+                                                 : red;
+                } else {
+                    col = track_color;
+                }
+                canvas.fillRect(bx, sy, bar_w, seg_h, col);
+            }
+        }
+
         
-        int active_fill_w = int(mix_volume * total_bar_w);
-        if (active_fill_w > 0) {
-            canvas.fillRect(left + PADDING_INNER + 1, top + 3, active_fill_w - 2, 4, TFT_SILVER);
-        }
+        canvas.fillRect(col_x, vol_bar_y, col_w, vol_bar_h, track_color); 
+        canvas.fillRect(col_x, vol_bar_y, col_w * set_vol / 100, vol_bar_h,
+                        vol_fill); 
+
+        
+        canvas.setTextColor(text_col);
+        canvas.setTextDatum(lgfx::textdatum_t::top_left);
+        canvas.drawString(names[i], col_x, text_y);
+        canvas.setTextDatum(lgfx::textdatum_t::top_right);
+        canvas.drawString((std::to_string(set_vol) + "%").c_str(), col_x + col_w, text_y);
     }
-}
-*/
 
-void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, uint8_t *volumes)
-{
-    const char *channel_names[5] = {"SYSTEM", "DISCRD", "SPOTFY", "GAMING", "BROWSR"};
-
-    int w = canvas.width();
-    int h = canvas.height();
-
-    int channel_h =
-        h - PADDING * 2 - BORDER_WIDTH * 4 - canvas.fontHeight() * 3 - PADDING_INNER * 6;
-    int total_available_w = w - (PADDING * 2);
-    int channel_w = total_available_w / 5;
-
-    int fixed_bar_h = int((channel_h - PADDING_INNER * 4) * 0.8);
-
-    for (int i = 0; i < MIXER_CHANNELS; i++) {
-        int left = PADDING + (channel_w * i);
-        int top = PADDING + BORDER_WIDTH * 2 + canvas.fontHeight() + PADDING_INNER * 2;
-
-        if (i > 0) {
-            canvas.drawFastVLine(left, top, channel_h, TFT_SILVER);
-        }
-
-        const int GAP = 4;
-        int line_offset = (i > 0) ? 1 : 0;
-
-        int available_w = channel_w - (PADDING_INNER * 2) - line_offset;
-        int stereo_w = (available_w - GAP) / 2;
-
-        int active_bar_h = int(fixed_bar_h * volumes[i] / 100);
-
-        // 1. Pulisci l'interno del box con il nero per eliminare i vecchi frame
-        canvas.fillRect(left + PADDING_INNER + line_offset + 1, top + PADDING_INNER + 1, 
-                        stereo_w - 2, fixed_bar_h - 2, TFT_BLACK);
-        canvas.fillRect(left + PADDING_INNER + line_offset + stereo_w + GAP + 1, top + PADDING_INNER + 1, 
-                        stereo_w - 2, fixed_bar_h - 2, TFT_BLACK);
-
-        // 2. Disegna i rettangoli di contorno vuoti (Stile minimale)
-        canvas.drawRect(left + PADDING_INNER + line_offset, top + PADDING_INNER, stereo_w,
-                        fixed_bar_h, TFT_DARKGRAY);
-        canvas.drawRect(left + PADDING_INNER + line_offset + stereo_w + GAP,
-                        top + PADDING_INNER, stereo_w, fixed_bar_h, TFT_DARKGRAY);
-
-        // 3. NUOVO: DISEGNO SEGMENTATO (A TACCHE) PER ABBATTERE IL TEARING
-        const int SEGMENT_H = 2; // Altezza di ogni singola tacca in pixel
-        const int SEGMENT_SPACE = 1; // Spazio vuoto tra le tacche in pixel
-        int step = SEGMENT_H + SEGMENT_SPACE;
-
-        // Disegniamo i segmenti partendo dal basso del VU-meter verso l'alto
-        for (int y_offset = 0; y_offset < active_bar_h; y_offset += step) {
-            int draw_y = top + PADDING_INNER + fixed_bar_h - y_offset - SEGMENT_H;
-            
-            // Sicurezza: non disegnare fuori dal bordo superiore del VU-meter
-            if (draw_y < top + PADDING_INNER + 1) break;
-
-            // Disegna la tacca orizzontale sul canale Sinistro
-            canvas.fillRect(left + PADDING_INNER + line_offset + 1, draw_y, 
-                            stereo_w - 2, SEGMENT_H, TFT_SILVER);
-
-            // Disegna la tacca orizzontale sul canale Destro
-            canvas.fillRect(left + PADDING_INNER + line_offset + stereo_w + GAP + 1, draw_y, 
-                            stereo_w - 2, SEGMENT_H, TFT_SILVER);
-        }
-
-        // --- DISEGNO TESTO E INTERFACCIA INFERIORE ---
-        top += PADDING_INNER + fixed_bar_h;
-
-        int str_w = canvas.textWidth(channel_names[i]);
-        canvas.drawString(channel_names[i], left + int((channel_w - str_w) / 2),
-                          top + PADDING_INNER);
-
-        top += canvas.fontHeight() + PADDING_INNER;
-
-        float mix_volume = 75.0f / 100.0f;
-        str_w = canvas.textWidth("75%");
-
-        canvas.drawString("75%", left + int((channel_w - str_w) / 2), top);
-
-        top += canvas.fontHeight();
-
-        int total_bar_w = channel_w - PADDING_INNER * 2;
-        canvas.drawRect(left + PADDING_INNER, top + 2, total_bar_w, 6, TFT_SILVER);
-
-        int active_fill_w = int(mix_volume * total_bar_w);
-        if (active_fill_w > 0) {
-            canvas.fillRect(left + PADDING_INNER + 1, top + 3, active_fill_w - 2, 4, TFT_SILVER);
-        }
-    }
+    canvas.setTextDatum(lgfx::textdatum_t::top_left);
 }
 
-void GUI::draw_system_stats(lgfx::LGFX_Sprite &canvas)
+void GUI::draw_system_stats(lgfx::LGFX_Sprite &canvas, int unit) {}
+
+void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, int unit)
 {
-    int w = canvas.width();
+    const int w = canvas.width();
     int h = canvas.height();
+    const int count = 5;
+    const int gap = 6;
+    const int rect_h = 14;
+    const int y = h - PADDING - rect_h;
 
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<> distr(0, 99);
+    
+    const int avail = w - 2 * PADDING - (count - 1) * gap;
+    const int rect_w = avail / count;
 
-    int ram_val = distr(gen);
-    int cpu_val = distr(gen);
+    
+    canvas.setFont(&fonts::efontCN_12);
+    canvas.setTextSize(1.0f);
+    canvas.setTextColor(TFT_BLACK);
+    canvas.setTextDatum(lgfx::textdatum_t::middle_center);
 
-    std::stringstream ram_ss;
-    ram_ss << "[RAM] " << std::setw(2) << std::setfill('0') << ram_val << "%";
-    std::string ram_str = ram_ss.str();
+    for (int i = 0; i < count; i++) {
+        int x = PADDING + i * (rect_w + gap);
 
-    std::stringstream cpu_ss;
-    cpu_ss << "[CPU] " << std::setw(2) << std::setfill('0') << cpu_val << "%";
-    std::string cpu_str = cpu_ss.str();
+        
+        canvas.fillRect(x, y, rect_w, rect_h, TFT_GRAY);
 
-    int ram_str_w = canvas.textWidth(ram_str.c_str());
+        
+        std::string label = "MACRO " + std::to_string(i + 1);
+        canvas.drawString(label.c_str(), x + rect_w / 2, y + rect_h / 2);
+    }
 
-    canvas.drawString(ram_str.c_str(), PADDING + BORDER_WIDTH + PADDING_INNER,
-                      h - PADDING - BORDER_WIDTH - PADDING_INNER - canvas.fontHeight());
-
-    canvas.drawFastHLine(PADDING + BORDER_WIDTH,
-                         h - PADDING - BORDER_WIDTH - PADDING_INNER * 2 -
-                             canvas.fontHeight(),
-                         PADDING_INNER * 2 + ram_str_w, TFT_SILVER);
-    canvas.drawFastHLine(PADDING,
-                         h - PADDING - BORDER_WIDTH * 2 - PADDING_INNER * 4 -
-                             canvas.fontHeight() * 2,
-                         w - PADDING * 2, TFT_SILVER);
-    canvas.drawFastVLine(PADDING + BORDER_WIDTH + PADDING_INNER * 2 + ram_str_w,
-                         h - PADDING - BORDER_WIDTH -
-                             (PADDING_INNER * 4 + BORDER_WIDTH + canvas.fontHeight() * 2),
-                         PADDING_INNER * 4 + BORDER_WIDTH + canvas.fontHeight() * 2,
-                         TFT_SILVER);
-    canvas.drawString(cpu_str.c_str(), PADDING + BORDER_WIDTH + PADDING_INNER,
-                      h - PADDING - BORDER_WIDTH * 2 - PADDING_INNER * 3 -
-                          canvas.fontHeight() * 2);
+    canvas.setTextDatum(lgfx::textdatum_t::top_left); 
 }
 
-void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas)
+void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, int unit)
 {
-    int w = canvas.width();
-    int h = canvas.height();
+    
+    const int scale = 2;
+    const int amp = 28;
+    const int baseline = 240 - PADDING - 14 - PADDING;
+    const float thickness = 1.0f;
+    const int grid_color = canvas.color565(40, 40, 40);
+    const int wave_color = TFT_GRAY;
+    const int dark = canvas.color565(40, 40, 40);
+    const int w = canvas.width();
 
-    int ram_str_w = canvas.textWidth("[RAM] 00%");
+    
+    auto sample_y = [&](int idx) -> float {
+        return baseline + (amp * (1.0f - audio_history[idx]) / 100.0f) * scale;
+    };
 
-    int left = PADDING + BORDER_WIDTH * 2 + PADDING_INNER * 3 + ram_str_w;
-    int top = h - PADDING - BORDER_WIDTH * 2 - PADDING_INNER * 4 -
-              canvas.fontHeight() * 2 + BORDER_WIDTH + PADDING_INNER;
+    
+    canvas.setTextSize(1.2f);
+    const int output_w = canvas.textWidth("OUTPUT");
 
-    int full_height = canvas.fontHeight() * 2 + BORDER_WIDTH + PADDING_INNER * 2;
+    const int x_left = PADDING + output_w + 10;
+    const int x_right = w - PADDING;
+    const int grid_w = x_right - x_left;
 
-    for (int i = 0; i < AUDIO_GRAPH_SAMPLES - 1; i++) {
-        int height = full_height * audio_history[i] / 100;
-        canvas.drawFastVLine(left + i, top + int((full_height - height) / 2), height,
-                             TFT_SILVER);
+    int samples = grid_w / scale + 1;
+    if (samples > AUDIO_GRAPH_SAMPLES)
+        samples = AUDIO_GRAPH_SAMPLES;
+
+    
+    const int y0 = baseline;
+    const int y50 = baseline - amp * scale / 2;
+    const int y100 = baseline - amp * scale;
+
+    canvas.drawFastHLine(PADDING, y0, w - PADDING * 2, grid_color);
+    canvas.drawFastHLine(x_left, y100, grid_w, grid_color);
+
+    const int dash = 4, gap = 4;
+    for (int dx = x_left; dx < x_right; dx += dash + gap) {
+        int len = (dx + dash <= x_right) ? dash : (x_right - dx);
+        canvas.drawFastHLine(dx, y50, len, grid_color);
     }
+
+    
+    float prev_x = 0, prev_y = 0;
+    bool have_prev = false;
+    for (int n = 0; n < samples; n++) {
+        int i = AUDIO_GRAPH_SAMPLES - 1 - n;
+        if (i < 0)
+            break;
+        float x = x_right - n * scale;
+        float y = sample_y(i);
+        if (have_prev) {
+            canvas.drawWideLine(prev_x, prev_y, x, y, thickness, wave_color);
+        }
+        prev_x = x;
+        prev_y = y;
+        have_prev = true;
+    }
+
+    
+    int last_val = (int)audio_history[AUDIO_GRAPH_SAMPLES - 1];
+    int peak_val = (int)audio_history[0];
+    for (int k = 1; k < AUDIO_GRAPH_SAMPLES; k++) {
+        int v = (int)audio_history[k];
+        if (v > peak_val)
+            peak_val = v;
+    }
+
+    
+    int cursor_y = y100 - 3;
+    auto draw_label = [&](const std::string &s, int color, float size) {
+        canvas.setTextColor(color);
+        canvas.setTextSize(size);
+        canvas.drawString(s.c_str(), PADDING, cursor_y);
+        cursor_y += canvas.fontHeight();
+    };
+
+    draw_label("OUTPUT", dark, 1.2f);
+    draw_label(std::to_string(last_val), TFT_GRAY, 2.0f);
+    draw_label("PEAK " + std::to_string(peak_val), dark, 1.0f);
+
+    canvas.setTextSize(1.0f); 
 }

@@ -7,9 +7,9 @@ static const char *TAG = "display_component";
 #define PIN_NUM_MOSI 11
 #define PIN_NUM_MISO -1
 
-#define PIN_NUM_LCD_DC 4
-#define PIN_NUM_LCD_RST 6
-#define PIN_NUM_LCD_CS 5
+#define PIN_NUM_LCD_CS 4
+#define PIN_NUM_LCD_RST 5
+#define PIN_NUM_LCD_DC 6
 
 #define PANEL_NATIVE_WIDTH 320
 #define PANEL_NATIVE_HEIGHT 240
@@ -27,8 +27,9 @@ void Display::init()
 
     bus_cfg.spi_host = SPI2_HOST;  // Using SPI2_HOST (FSPI)
     bus_cfg.spi_mode = 0;          // Data latch on rising edge, clock idle low
-    bus_cfg.freq_write = 40000000; // 40MHz SPI clock
+    bus_cfg.freq_write = 80000000; // 40MHz SPI clock
     bus_cfg.freq_read = 16000000;  // 16MHz read clock
+    bus_cfg.dma_channel = SPI_DMA_CH_AUTO;
     bus_cfg.pin_sclk = PIN_NUM_SCLK;
     bus_cfg.pin_mosi = PIN_NUM_MOSI;
     bus_cfg.pin_miso = PIN_NUM_MISO; // Write-only bus

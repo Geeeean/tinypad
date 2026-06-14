@@ -21,10 +21,11 @@ class GUI {
     static void gui_task(void *pvParameters);
 
     // Specific layout rendering functions (Drawing into the RAM sprite)
-    void draw_top_bar(lgfx::LGFX_Sprite &canvas);
+    void draw_top_bar(lgfx::LGFX_Sprite &canvas, int unit);
     void draw_vu_meters(lgfx::LGFX_Sprite &canvas, uint8_t *volumes);
-    void draw_system_stats(lgfx::LGFX_Sprite &canvas);
-    void draw_audio_waveform(lgfx::LGFX_Sprite &canvas);
+    void draw_system_stats(lgfx::LGFX_Sprite &canvas, int unit);
+    void draw_audio_waveform(lgfx::LGFX_Sprite &canvas, int unit);
+    void draw_macro_label(lgfx::LGFX_Sprite &canvas, int unit);
 
     USBManager::Config _config;
 };
