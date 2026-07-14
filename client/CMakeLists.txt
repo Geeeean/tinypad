@@ -116,6 +116,17 @@ if(WIN32)
             "$<TARGET_FILE_DIR:tinypad>"
         COMMENT "Copying WebView2Loader.dll (${TINYPAD_WEBVIEW2_ARCH}) next to tinypad.exe"
     )
+
+    # Temporary: webview_create()'s C API discards the real failure reason.
+    # This calls the C++ layer directly and prints it. Delete
+    # tests/webview_diag.cpp and this block once done diagnosing.
+    add_executable(webview_diag tests/webview_diag.cpp)
+    target_link_libraries(webview_diag PRIVATE webview::core_static ole32 oleaut32 user32)
+    add_custom_command(TARGET webview_diag POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/_deps/microsoft_web_webview2-src/build/native/${TINYPAD_WEBVIEW2_ARCH}/WebView2Loader.dll"
+            "$<TARGET_FILE_DIR:webview_diag>"
+    )
 elseif(APPLE)
     # Audio is a stub (no extra libs there); webview::core_static already
     # pulls in WebKit/Cocoa via webview's own CMake. ApplicationServices is
