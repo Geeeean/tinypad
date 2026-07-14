@@ -394,7 +394,11 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     bridge->macros = macros;
     bridge->settings = settings;
 
-    bridge->w = webview_create(0, NULL);
+    // Temporary: debug=1 to allow opening DevTools (right-click -> Inspect,
+    // or F12) while diagnosing why the UI doesn't reflect pushed session
+    // state despite the JSON reaching webview_eval() correctly. Revert to
+    // 0 once done.
+    bridge->w = webview_create(1, NULL);
     if (!bridge->w) {
         free(bridge);
         return NULL;
