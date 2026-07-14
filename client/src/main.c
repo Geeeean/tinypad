@@ -3,6 +3,7 @@
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
 #include "platform/audio_backend.h"
+#include "platform/com_init.h"
 #include "platform/serial_port.h"
 #include "platform/thread.h"
 #include "ui/ui_bridge.h"
@@ -37,6 +38,11 @@ static void background_loop(void *arg)
 
 int main(int argc, char **argv)
 {
+    // Must happen before anything that might touch COM itself (WASAPI via
+    // mixer_state_create() below, webview internally via ui_bridge_create())
+    // -- see platform/com_init.h for why order matters here.
+    platform_com_init();
+
     const char *device_path = argc > 1 ? argv[1] : getenv("TINYPAD_DEVICE");
 
     macro_map_t *macros = macro_map_create();
@@ -101,6 +107,7 @@ int main(int argc, char **argv)
     mixer_state_destroy(mixer);
     macro_map_destroy(macros);
     device_settings_destroy(settings);
+    platform_com_uninit();
 
     return 0;
 }
