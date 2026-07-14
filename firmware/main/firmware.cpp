@@ -7,6 +7,7 @@
 
 static levels_packet shared_levels;
 static metadata_packet shared_metadata;
+static device_config_packet shared_device_config;
 static SemaphoreHandle_t shared_mutex = nullptr;
 static USBManager::Config shared_config;
 
@@ -26,6 +27,7 @@ extern "C" void app_main(void)
 
     shared_config.shared_levels = &shared_levels;
     shared_config.shared_metadata = &shared_metadata;
+    shared_config.shared_device_config = &shared_device_config;
     shared_config.mutex = shared_mutex;
 
     // usb_manager.init() installs the TinyUSB driver; input_manager's task

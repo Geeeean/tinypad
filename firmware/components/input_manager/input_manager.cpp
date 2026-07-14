@@ -95,6 +95,35 @@ void InputManager::init()
     configure_gpio();
 }
 
+// Mirrors scan_matrix()/scan_encoders()'s readings but writes straight into
+// the debounce state instead of going through process_edge()/send_command()
+// -- this is a baseline snapshot, not an edge detection pass.
+void InputManager::prime_state()
+{
+    for (int r = 0; r < MATRIX_ROWS; r++) {
+        gpio_set_level(ROW_PINS[r], 0);
+        esp_rom_delay_us(5);
+
+        for (int c = 0; c < MATRIX_COLS; c++) {
+            int key = r * MATRIX_COLS + c;
+            _matrix_pressed[key] = (gpio_get_level(COL_PINS[c]) == 0);
+            _matrix_debounce_count[key] = 0;
+        }
+
+        gpio_set_level(ROW_PINS[r], 1);
+    }
+
+    for (int e = 0; e < ENCODER_COUNT; e++) {
+        uint8_t clk = gpio_get_level(ENCODER_CLK_PINS[e]);
+        uint8_t dt = gpio_get_level(ENCODER_DT_PINS[e]);
+        _encoder_quad_state[e] = (clk << 1) | dt;
+        _encoder_step_accum[e] = 0;
+
+        _encoder_btn_pressed[e] = (gpio_get_level(ENCODER_BTN_PINS[e]) == 0);
+        _encoder_btn_debounce_count[e] = 0;
+    }
+}
+
 void InputManager::start()
 {
     ESP_LOGI(TAG, "Spawning input processing task...");
@@ -112,6 +141,12 @@ void InputManager::input_task(void *pvParameters)
     ESP_LOGI(TAG, "Input Thread alive.");
 
     InputManager *instance = static_cast<InputManager *>(pvParameters);
+
+    // Give power-on electrical transients (pull-ups charging, matrix RC
+    // settle) time to die down, then seed the debounce state from the
+    // actual current reading before the first real scan runs.
+    vTaskDelay(pdMS_TO_TICKS(STARTUP_SETTLE_MS));
+    instance->prime_state();
 
     while (true) {
         instance->scan_matrix();

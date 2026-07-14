@@ -1,6 +1,7 @@
-velvet
 obj
 build
 .cache
 managed_components
 __pycache__
+node_modules
+dist

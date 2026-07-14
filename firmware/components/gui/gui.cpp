@@ -37,16 +37,6 @@ static int channel_column_x(int channel_index, int column_width)
     return PADDING + channel_index * (column_width + CHANNEL_COLUMN_GAP);
 }
 
-void GUI::set_graph_visible(bool visible)
-{
-    _show_graph.store(visible);
-}
-
-void GUI::toggle_graph()
-{
-    _show_graph.store(!_show_graph.load());
-}
-
 // Lays out the screen top-to-bottom: VU meters, then (if enabled) the
 // waveform graph, then the macro grid pinned to the bottom. Each section's
 // size is derived here so none of the draw_* functions hardcode positions
@@ -103,6 +93,11 @@ void GUI::init(USBManager::Config config)
     }
     if (_config.shared_metadata != nullptr) {
         std::memset(_config.shared_metadata, 0, sizeof(metadata_packet));
+    }
+    if (_config.shared_device_config != nullptr) {
+        std::memset(_config.shared_device_config, 0, sizeof(device_config_packet));
+        // Graph is on by default until the host sends its own preference.
+        _config.shared_device_config->show_graph = 1;
     }
 }
 
@@ -173,10 +168,10 @@ void GUI::gui_task(void *pvParameters)
     while (true) {
         levels_packet local_levels = {0};
         metadata_packet local_metadata = {0};
-
+        device_config_packet local_device_config = {0};
+        local_device_config.show_graph = 1; // matches GUI::init()'s default
 
         SemaphoreHandle_t mtx = instance->_config.mutex;
-
 
         if (mtx != nullptr && xSemaphoreTake(mtx, pdMS_TO_TICKS(2)) == pdTRUE) {
             if (instance->_config.shared_levels != nullptr) {
@@ -184,6 +179,9 @@ void GUI::gui_task(void *pvParameters)
             }
             if (instance->_config.shared_metadata != nullptr) {
                 local_metadata = *instance->_config.shared_metadata;
+            }
+            if (instance->_config.shared_device_config != nullptr) {
+                local_device_config = *instance->_config.shared_device_config;
             }
 
             if (local_levels.valid) {
@@ -202,10 +200,10 @@ void GUI::gui_task(void *pvParameters)
             canvas.setTextColor(TFT_SILVER, TFT_BLACK);
             canvas.setTextDatum(TL_DATUM);
 
-            std::string title = "VELVET MIXER";
+            std::string title = "TINYPAD MIXER";
             int title_str_w = canvas.textWidth(title.c_str());
 
-            canvas.drawString("VELVET MIXER", int(w / 2 - title_str_w / 2),
+            canvas.drawString("TINYPAD MIXER", int(w / 2 - title_str_w / 2),
                               int(h / 2 - canvas.fontHeight() / 2));
         } else {
             // Shifting array elements to the left for history graph
@@ -226,11 +224,11 @@ void GUI::gui_task(void *pvParameters)
             audio_history[AUDIO_GRAPH_SAMPLES - 1] =
                 get_smoothed_output_level(output_levels, MIXER_CHANNELS, smoothed_volume);
 
-            Layout layout = compute_layout(h, instance->_show_graph.load());
+            Layout layout = compute_layout(h, local_device_config.show_graph != 0);
 
             canvas.fillScreen(TFT_BLACK);
             instance->draw_audio_waveform(canvas, layout);
-            instance->draw_macro_label(canvas, layout);
+            instance->draw_macro_label(canvas, layout, local_device_config);
             instance->draw_vu_meters(canvas, local_levels.channels, local_metadata, layout);
         }
 
@@ -264,7 +262,7 @@ void GUI::draw_top_bar(lgfx::LGFX_Sprite &canvas, int unit)
     canvas.setTextSize(1.0f);
     canvas.setTextColor(TFT_SILVER);
     canvas.setTextDatum(lgfx::textdatum_t::middle_left);
-    canvas.drawString("VELVET", PADDING, cy);
+    canvas.drawString("TINYPAD", PADDING, cy);
 
     
     canvas.setFont(&fonts::efontCN_12);
@@ -415,13 +413,16 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
 
 void GUI::draw_system_stats(lgfx::LGFX_Sprite &canvas, int unit) {}
 
-void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout)
+void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout,
+                           const device_config_packet &device_config)
 {
     const int w = canvas.width();
 
     constexpr int cols = MIXER_CHANNELS;
     constexpr int rows = 2;
     constexpr int macro_count = rows * cols;
+    static_assert(macro_count == MACRO_BUTTON_COUNT,
+                  "macro grid geometry no longer matches the wire protocol's label count");
 
     const int row_gap = layout.macro_row_gap;
     const int rect_h = layout.macro_rect_h;
@@ -442,7 +443,12 @@ void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout)
 
         canvas.fillRect(x, y, rect_w, rect_h, TFT_GRAY);
 
-        std::string label = "MACRO " + std::to_string(i + 1);
+        // device_config.macro_labels[i] is a fixed-length field with no
+        // guaranteed null terminator, same caveat as metadata.names in
+        // draw_vu_meters -- bound the read explicitly.
+        size_t label_len = strnlen(device_config.macro_labels[i], MACRO_LABEL_LEN);
+        std::string label = label_len > 0 ? std::string(device_config.macro_labels[i], label_len)
+                                          : "MACRO " + std::to_string(i + 1);
         canvas.drawString(label.c_str(), x + rect_w / 2, y + rect_h / 2);
     }
 

@@ -34,9 +34,21 @@ class InputManager {
     // real press/release, to reject mechanical switch bounce.
     static constexpr uint8_t DEBOUNCE_SCANS = 3;
 
+    // Held after configure_gpio() and before the first scan, so pull-up/
+    // matrix RC transients from power-on have died down before anything is
+    // trusted (see prime_state()).
+    static constexpr int STARTUP_SETTLE_MS = 50;
+
     static void input_task(void *pvParameters);
 
     void configure_gpio();
+    // Reads current GPIO levels straight into the debounce state (matrix,
+    // encoder buttons, encoder quadrature) without ever calling
+    // send_command(). Run once at startup so the first real scan compares
+    // against reality instead of an assumed "everything unpressed" state --
+    // otherwise a stale/bouncing reading during power-on can look like a
+    // real edge and fire a spurious command before things settle.
+    void prime_state();
     void scan_matrix();
     void scan_encoders();
 

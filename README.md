@@ -1,8 +1,8 @@
-# Velvet
+# TinyPad
 
 > Work in progress — early development stage across all areas.
 
-Velvet is a custom macro pad and audio mixer controller built around the ESP32-S3. It features physical encoders and buttons for controlling audio levels and triggering actions, a display for real-time feedback, and software integration with applications like OBS, Photoshop, and others. It communicates with a PC driver that exposes per-application controls and automation.
+TinyPad is a custom macro pad and audio mixer controller built around the ESP32-S3. It features physical encoders and buttons for controlling audio levels and triggering actions, a display for real-time feedback, and software integration with applications like OBS, Photoshop, and others. It communicates with a PC driver that exposes per-application controls and automation.
 
 ---
 
@@ -11,9 +11,9 @@ Velvet is a custom macro pad and audio mixer controller built around the ESP32-S
 A custom board designed around the ESP32-S3. Currently still in a dev board phase, with layout and design rules not fully optimized. A rerouting pass is planned to fix annular ring sizes, differential pair length matching, and trace distances.
 
 <p>
-  <img src="images/velvet_front.png" width="48%" alt="PCB Front"/>
+  <img src="images/tinypad_front.png" width="48%" alt="PCB Front"/>
   &nbsp;
-  <img src="images/velvet_back.png" width="48%" alt="PCB Back"/>
+  <img src="images/tinypad_back.png" width="48%" alt="PCB Back"/>
 </p>
 
 **To do:**

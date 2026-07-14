@@ -1,7 +1,6 @@
 #include "usb_manager.hpp"
 #include "esp_log.h"
 #include "tinyusb.h"
-#include <algorithm>
 
 static const char *TAG = "USB";
 
@@ -10,6 +9,7 @@ void USBManager::init(Config config)
     ESP_LOGI(TAG, "Initializing hardware...");
 
     _config = config;
+    protocol_reader_init(&_reader);
 
     tinyusb_config_t tusb_cfg = {
         .port = TINYUSB_PORT_FULL_SPEED_0,
@@ -52,10 +52,12 @@ void USBManager::usb_task(void *pvParameters)
 
     levels_packet incoming_levels;
     metadata_packet incoming_metadata;
+    device_config_packet incoming_device_config;
     PacketType incoming_type;
 
     while (true) {
-        if (instance->receive_data(&incoming_levels, &incoming_metadata, &incoming_type)) {
+        if (instance->receive_data(&incoming_levels, &incoming_metadata, &incoming_device_config,
+                                   &incoming_type)) {
             SemaphoreHandle_t mtx = instance->_config.mutex;
 
             if (mtx != nullptr && xSemaphoreTake(mtx, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -65,6 +67,9 @@ void USBManager::usb_task(void *pvParameters)
                 } else if (incoming_type == PacketType::METADATA &&
                           instance->_config.shared_metadata != nullptr) {
                     *instance->_config.shared_metadata = incoming_metadata;
+                } else if (incoming_type == PacketType::DEVICE_CONFIG &&
+                          instance->_config.shared_device_config != nullptr) {
+                    *instance->_config.shared_device_config = incoming_device_config;
                 }
                 xSemaphoreGive(mtx);
             }
@@ -75,71 +80,45 @@ void USBManager::usb_task(void *pvParameters)
 }
 
 bool USBManager::receive_data(levels_packet *out_levels, metadata_packet *out_metadata,
-                              PacketType *out_type)
+                              device_config_packet *out_device_config, PacketType *out_type)
 {
-    while (true) {
-        uint32_t available = tud_cdc_n_available(0);
-        if (available == 0) {
-            break;
+    uint8_t byte;
+    while (tud_cdc_n_read(0, &byte, 1) == 1) {
+        uint8_t type;
+        size_t size;
+        protocol_feed_result_t result = protocol_reader_feed(&_reader, byte, &type, &size);
+
+        if (result == PROTOCOL_FEED_INCOMPLETE) {
+            continue;
         }
 
-        switch (_rx_state) {
-        case RxState::SYNC: {
-            uint8_t byte;
-            tud_cdc_n_read(0, &byte, 1);
-            if (byte == PROTOCOL_START_BYTE) {
-                _rx_buffer[0] = byte;
-                _rx_filled = 1;
-                _rx_state = RxState::TYPE;
-            }
-            break;
+        if (result == PROTOCOL_FEED_BAD_TYPE) {
+            ESP_LOGW(TAG, "USB packet discarded: unknown packet type 0x%02X", byte);
+            continue;
         }
 
-        case RxState::TYPE: {
-            uint8_t byte;
-            tud_cdc_n_read(0, &byte, 1);
-            _rx_buffer[1] = byte;
-            _rx_filled = 2;
-
-            if (!Protocol::size_for_type(byte, &_rx_target)) {
-                ESP_LOGW(TAG, "USB packet discarded: unknown packet type 0x%02X", byte);
-                _rx_state = RxState::SYNC;
-                _rx_filled = 0;
-                break;
-            }
-
-            _rx_state = RxState::BODY;
-            break;
+        if (result == PROTOCOL_FEED_BAD_CHECKSUM) {
+            ESP_LOGW(TAG, "USB packet discarded: bad checksum");
+            continue;
         }
 
-        case RxState::BODY: {
-            size_t remaining = _rx_target - _rx_filled;
-            size_t to_read = std::min<size_t>(remaining, available);
-            uint32_t bytes_read = tud_cdc_n_read(0, &_rx_buffer[_rx_filled], to_read);
-            _rx_filled += bytes_read;
+        // PROTOCOL_FEED_COMPLETE: reader->buffer[0..size) holds a validated
+        // packet. protocol_reader_feed() already reset the framing state for
+        // the next call, but leaves the buffer contents intact for us here.
+        PacketType packet_type = static_cast<PacketType>(type);
+        bool ok = false;
 
-            if (_rx_filled == _rx_target) {
-                PacketType type = static_cast<PacketType>(_rx_buffer[1]);
-                bool ok = false;
-
-                if (type == PacketType::LEVELS) {
-                    ok = Protocol::parse_levels_packet(_rx_buffer, _rx_target, out_levels);
-                } else if (type == PacketType::METADATA) {
-                    ok = Protocol::parse_metadata_packet(_rx_buffer, _rx_target, out_metadata);
-                }
-
-                _rx_state = RxState::SYNC;
-                _rx_filled = 0;
-
-                if (ok) {
-                    *out_type = type;
-                    return true;
-                }
-
-                ESP_LOGW(TAG, "USB packet discarded: bad checksum");
-            }
-            break;
+        if (packet_type == PacketType::LEVELS) {
+            ok = Protocol::parse_levels_packet(_reader.buffer, size, out_levels);
+        } else if (packet_type == PacketType::METADATA) {
+            ok = Protocol::parse_metadata_packet(_reader.buffer, size, out_metadata);
+        } else if (packet_type == PacketType::DEVICE_CONFIG) {
+            ok = Protocol::parse_device_config_packet(_reader.buffer, size, out_device_config);
         }
+
+        if (ok) {
+            *out_type = packet_type;
+            return true;
         }
     }
 
