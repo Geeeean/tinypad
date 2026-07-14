@@ -157,8 +157,12 @@ void ui_bridge_push_state(ui_bridge_t *bridge)
         last_logged_session_count = n;
     }
 
-    char js_buf[16384 + 64];
-    snprintf(js_buf, sizeof(js_buf), "window.onState && window.onState(%s)", json_buf);
+    char js_buf[16384 + 128];
+    snprintf(js_buf, sizeof(js_buf),
+             "try { window.onState && window.onState(%s); } "
+             "catch (e) { window.native_js_error && "
+             "window.native_js_error(String((e && e.stack) || e)); }",
+             json_buf);
     webview_eval(bridge->w, js_buf);
 }
 
@@ -313,6 +317,19 @@ static void native_set_show_graph(const char *id, const char *req, void *arg)
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
+// Temporary: DevTools are unavailable in this environment (policy-disabled,
+// no Inspect/F12), so window.onState's own try/catch (see
+// ui_bridge_push_state) reports failures here instead, visible the same
+// way everything else has been -- stderr. req is the raw JSON args array
+// webview_bind hands us, e.g. ["TypeError: ..."] -- not worth a real
+// parser for a one-off diagnostic.
+static void native_js_error(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    fprintf(stderr, "js_error: %s\n", req);
+    webview_return(bridge->w, id, 0, "true");
+}
+
 // --- window bootstrap ----------------------------------------------------
 
 static bool get_executable_dir(char *out, size_t out_size)
@@ -414,6 +431,7 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     webview_bind(bridge->w, "native_set_macro", native_set_macro, bridge);
     webview_bind(bridge->w, "native_set_macro_label", native_set_macro_label, bridge);
     webview_bind(bridge->w, "native_set_show_graph", native_set_show_graph, bridge);
+    webview_bind(bridge->w, "native_js_error", native_js_error, bridge);
 
     char url[1024];
     if (!resolve_ui_index_url(url, sizeof(url))) {
