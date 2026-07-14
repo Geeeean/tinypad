@@ -148,6 +148,15 @@ void ui_bridge_push_state(ui_bridge_t *bridge)
     sb_init(&sb, json_buf, sizeof(json_buf));
     build_state_json(bridge, &sb);
 
+    static int last_logged_session_count = -1;
+    audio_session_t probe[MIXER_MAX_SESSIONS];
+    int n = (int)mixer_state_list_sessions(bridge->mixer, probe, MIXER_MAX_SESSIONS);
+    if (n != last_logged_session_count) {
+        fprintf(stderr, "ui_bridge: session count changed %d -> %d, json=%s\n",
+                last_logged_session_count, n, json_buf);
+        last_logged_session_count = n;
+    }
+
     char js_buf[16384 + 64];
     snprintf(js_buf, sizeof(js_buf), "window.onState && window.onState(%s)", json_buf);
     webview_eval(bridge->w, js_buf);
