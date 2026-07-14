@@ -95,9 +95,16 @@ if(WIN32)
     # loader). Without it, webview_create() just returns NULL with no
     # diagnostic. Same NuGet package FindMSWebView2.cmake already fetched,
     # so no extra download.
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+    # Deliberately keyed off the *compiler's* target, not
+    # CMAKE_SYSTEM_PROCESSOR (which reports the host OS's processor --
+    # wrong when e.g. building x64 from an "x64 Native Tools" prompt on
+    # ARM64 Windows, which is exactly this project's dev setup. Loading a
+    # mismatched-architecture DLL fails silently, the same as it being
+    # missing entirely).
+    string(TOUPPER "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}" TINYPAD_ARCH_ID)
+    if(TINYPAD_ARCH_ID MATCHES "ARM64")
         set(TINYPAD_WEBVIEW2_ARCH "arm64")
-    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|x64")
+    elseif(TINYPAD_ARCH_ID MATCHES "X64")
         set(TINYPAD_WEBVIEW2_ARCH "x64")
     else()
         set(TINYPAD_WEBVIEW2_ARCH "x86")
