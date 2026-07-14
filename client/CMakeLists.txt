@@ -9,6 +9,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(MSVC)
+    # MSVC's own vcruntime_c11_stdatomic.h refuses to compile under /std:c11
+    # unless this is also set -- unrelated to whether our code uses atomics
+    # at all, just how MSVC gates its (still-experimental) C11 support.
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:/experimental:c11atomics>)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
