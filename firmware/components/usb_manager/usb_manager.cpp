@@ -1,6 +1,7 @@
 #include "usb_manager.hpp"
 #include "esp_log.h"
 #include "tinyusb.h"
+#include <algorithm>
 
 static const char *TAG = "USB";
 
@@ -49,43 +50,98 @@ void USBManager::usb_task(void *pvParameters)
 
     USBManager *instance = static_cast<USBManager *>(pvParameters);
 
-    mixer_data_in incoming_packet;
+    levels_packet incoming_levels;
+    metadata_packet incoming_metadata;
+    PacketType incoming_type;
 
     while (true) {
-        if (instance->receive_data(&incoming_packet)) {
+        if (instance->receive_data(&incoming_levels, &incoming_metadata, &incoming_type)) {
             SemaphoreHandle_t mtx = instance->_config.mutex;
-            mixer_data_in *shared = instance->_config.shared_data;
 
             if (mtx != nullptr && xSemaphoreTake(mtx, pdMS_TO_TICKS(5)) == pdTRUE) {
-                *shared = incoming_packet;
+                if (incoming_type == PacketType::LEVELS &&
+                    instance->_config.shared_levels != nullptr) {
+                    *instance->_config.shared_levels = incoming_levels;
+                } else if (incoming_type == PacketType::METADATA &&
+                          instance->_config.shared_metadata != nullptr) {
+                    *instance->_config.shared_metadata = incoming_metadata;
+                }
                 xSemaphoreGive(mtx);
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);
     }
 }
 
-bool USBManager::receive_data(mixer_data_in *out_data)
+bool USBManager::receive_data(levels_packet *out_levels, metadata_packet *out_metadata,
+                              PacketType *out_type)
 {
-    const size_t expected_size = sizeof(mixer_data_in);
+    while (true) {
+        uint32_t available = tud_cdc_n_available(0);
+        if (available == 0) {
+            break;
+        }
 
-    // Check if there are enough bytes waiting in the hardware CDC buffer (Port 0)
-    if (tud_cdc_n_available(0) < expected_size) {
-        return false;
+        switch (_rx_state) {
+        case RxState::SYNC: {
+            uint8_t byte;
+            tud_cdc_n_read(0, &byte, 1);
+            if (byte == PROTOCOL_START_BYTE) {
+                _rx_buffer[0] = byte;
+                _rx_filled = 1;
+                _rx_state = RxState::TYPE;
+            }
+            break;
+        }
+
+        case RxState::TYPE: {
+            uint8_t byte;
+            tud_cdc_n_read(0, &byte, 1);
+            _rx_buffer[1] = byte;
+            _rx_filled = 2;
+
+            if (!Protocol::size_for_type(byte, &_rx_target)) {
+                ESP_LOGW(TAG, "USB packet discarded: unknown packet type 0x%02X", byte);
+                _rx_state = RxState::SYNC;
+                _rx_filled = 0;
+                break;
+            }
+
+            _rx_state = RxState::BODY;
+            break;
+        }
+
+        case RxState::BODY: {
+            size_t remaining = _rx_target - _rx_filled;
+            size_t to_read = std::min<size_t>(remaining, available);
+            uint32_t bytes_read = tud_cdc_n_read(0, &_rx_buffer[_rx_filled], to_read);
+            _rx_filled += bytes_read;
+
+            if (_rx_filled == _rx_target) {
+                PacketType type = static_cast<PacketType>(_rx_buffer[1]);
+                bool ok = false;
+
+                if (type == PacketType::LEVELS) {
+                    ok = Protocol::parse_levels_packet(_rx_buffer, _rx_target, out_levels);
+                } else if (type == PacketType::METADATA) {
+                    ok = Protocol::parse_metadata_packet(_rx_buffer, _rx_target, out_metadata);
+                }
+
+                _rx_state = RxState::SYNC;
+                _rx_filled = 0;
+
+                if (ok) {
+                    *out_type = type;
+                    return true;
+                }
+
+                ESP_LOGW(TAG, "USB packet discarded: bad checksum");
+            }
+            break;
+        }
+        }
     }
 
-    uint8_t raw_buffer[expected_size];
-    uint32_t bytes_read = tud_cdc_n_read(0, raw_buffer, expected_size);
-
-    if (bytes_read != expected_size) {
-        return false;
-    }
-
-    if (!Protocol::parse_packet(raw_buffer, expected_size, out_data)) {
-        ESP_LOGW(TAG, "USB packet discarded: bad header or checksum");
-        return false;
-    }
-
-    return true;
+    return false;
 }

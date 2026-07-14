@@ -27,7 +27,7 @@ void Display::init()
 
     bus_cfg.spi_host = SPI2_HOST;  // Using SPI2_HOST (FSPI)
     bus_cfg.spi_mode = 0;          // Data latch on rising edge, clock idle low
-    bus_cfg.freq_write = 80000000; // 40MHz SPI clock
+    bus_cfg.freq_write = 40000000; // 40MHz SPI clock
     bus_cfg.freq_read = 16000000;  // 16MHz read clock
     bus_cfg.dma_channel = SPI_DMA_CH_AUTO;
     bus_cfg.pin_sclk = PIN_NUM_SCLK;

@@ -1,0 +1,55 @@
+#pragma once
+
+#include "driver/gpio.h"
+#include "protocol.hpp"
+#include <cstdint>
+
+// Reads the 2x4 key matrix and the 4 rotary encoders (CLK/DT/BTN each),
+// debounces/decodes them, and pushes a Command over USB CDC on every
+// press/turn. Pin assignments and counts live at the top of the .cpp so a
+// future hardware revision only means editing that table. The current PCB
+// physically wires a 2x5 matrix and a 5th encoder (COL_5 / Encoder 5 in the
+// GPIO doc); the next revision drops both, so only 4 columns / 4 encoders
+// are used here.
+class InputManager {
+  public:
+    // Hardware shape, public so the pin/command tables in input_manager.cpp
+    // can size their arrays off it at file scope.
+    static constexpr int MATRIX_ROWS = 2;
+    static constexpr int MATRIX_COLS = 4;
+    static constexpr int MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS;
+    static constexpr int ENCODER_COUNT = 4;
+
+    void init();
+    void start();
+
+  private:
+    // Electrical quadrature transitions per physical detent. 4 is typical
+    // for cheap EC11-style encoders; tune per the actual part in use.
+    static constexpr int STEPS_PER_DETENT = 4;
+
+    static constexpr int SCAN_PERIOD_MS = 1;
+
+    // Consecutive scans a raw reading must hold before it's accepted as a
+    // real press/release, to reject mechanical switch bounce.
+    static constexpr uint8_t DEBOUNCE_SCANS = 3;
+
+    static void input_task(void *pvParameters);
+
+    void configure_gpio();
+    void scan_matrix();
+    void scan_encoders();
+
+    static void process_edge(bool raw_pressed, uint8_t &debounce_count, bool &pressed,
+                             Command command);
+    static void send_command(Command command);
+
+    uint8_t _matrix_debounce_count[MATRIX_KEYS] = {0};
+    bool _matrix_pressed[MATRIX_KEYS] = {false};
+
+    uint8_t _encoder_quad_state[ENCODER_COUNT] = {0};
+    int8_t _encoder_step_accum[ENCODER_COUNT] = {0};
+
+    uint8_t _encoder_btn_debounce_count[ENCODER_COUNT] = {0};
+    bool _encoder_btn_pressed[ENCODER_COUNT] = {false};
+};
