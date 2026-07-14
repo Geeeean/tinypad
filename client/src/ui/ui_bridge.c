@@ -137,6 +137,22 @@ static void build_state_json(ui_bridge_t *bridge, strbuf_t *sb)
     sb_appendf(sb, "]}}");
 }
 
+// ui_bridge_push_state() is called from main.c's background polling thread,
+// but webview_eval() ultimately calls into a native UI object (WebView2's
+// ICoreWebView2::ExecuteScript on Windows, an STA-affinitized COM object
+// tied to the thread that created it) that isn't safe to touch from any
+// other thread. webview_dispatch() marshals the call onto the thread
+// actually running the UI event loop instead -- this is the *documented*
+// way to do this, not a workaround. WKWebView/GTK tolerated the direct
+// cross-thread call well enough that this went unnoticed through all of
+// this project's macOS/Linux testing; WebView2 does not.
+static void dispatched_eval(webview_t w, void *arg)
+{
+    char *js = arg;
+    webview_eval(w, js);
+    free(js);
+}
+
 void ui_bridge_push_state(ui_bridge_t *bridge)
 {
     if (!bridge || !bridge->w) {
@@ -163,7 +179,13 @@ void ui_bridge_push_state(ui_bridge_t *bridge)
              "catch (e) { window.native_js_error && "
              "window.native_js_error(String((e && e.stack) || e)); }",
              json_buf);
-    webview_eval(bridge->w, js_buf);
+
+    size_t js_len = strlen(js_buf) + 1;
+    char *js_copy = malloc(js_len);
+    if (js_copy) {
+        memcpy(js_copy, js_buf, js_len);
+        webview_dispatch(bridge->w, dispatched_eval, js_copy);
+    }
 }
 
 // --- JS -> native bound functions --------------------------------------
