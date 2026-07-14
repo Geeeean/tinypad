@@ -83,6 +83,14 @@ target_include_directories(tinypad PRIVATE
 target_link_libraries(tinypad PRIVATE webview::core_static)
 
 if(WIN32)
+    # Belt-and-suspenders alongside audio_windows_wasapi.c's own #define
+    # INITGUID: forces it on before the compiler reads a single token, so a
+    # header pulled in ahead of that file's own #include order can't lock
+    # in DEFINE_GUID's declare-only expansion first (see that file's
+    # comment -- this is what actually defines IID_IMMDeviceEnumerator,
+    # CLSID_MMDeviceEnumerator, etc. instead of leaving them as unresolved
+    # externs).
+    target_compile_definitions(tinypad PRIVATE INITGUID)
     target_link_libraries(tinypad PRIVATE ole32 oleaut32 user32)
 elseif(APPLE)
     # Audio is a stub (no extra libs there); webview::core_static already

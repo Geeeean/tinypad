@@ -11,15 +11,22 @@
 // change" and "frequent level update" without needing
 // IMMNotificationClient/IAudioSessionNotification plumbing.
 
+// INITGUID must be defined before the *first* inclusion of <guiddef.h> in
+// this translation unit -- if anything pulled it in earlier without
+// INITGUID set, DEFINE_GUID's expansion (declare-only vs. actually-define)
+// is locked in for the rest of the file regardless of #define order here.
+// <windows.h> is what actually drags in <guiddef.h>, so it must come
+// first; CMakeLists.txt additionally passes /DINITGUID so this holds even
+// if some other header ends up included before this one.
 #define INITGUID
-#include "platform/audio_backend.h"
+#include <windows.h>
 #include <audiopolicy.h>
 #include <endpointvolume.h>
 #include <mmdeviceapi.h>
+#include "platform/audio_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
 
 #define MAX_BACKEND_SESSIONS 64
 #define WASAPI_ENUM_INTERVAL_MS 200
