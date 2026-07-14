@@ -84,6 +84,31 @@ target_link_libraries(tinypad PRIVATE webview::core_static)
 
 if(WIN32)
     target_link_libraries(tinypad PRIVATE ole32 oleaut32 user32)
+
+    # webview only ever fetches WebView2's *headers* (MSWebView2::headers,
+    # an include-dir-only interface target -- see
+    # _deps/webview-src/cmake/modules/FindMSWebView2.cmake); it never
+    # copies the loader DLL anywhere. WebView2Loader.dll is a real runtime
+    # dependency the app must ship next to its own .exe -- it is NOT part
+    # of the system-wide WebView2 Runtime install (that only provides
+    # msedgewebview2.exe/the browser process, discovered *through* this
+    # loader). Without it, webview_create() just returns NULL with no
+    # diagnostic. Same NuGet package FindMSWebView2.cmake already fetched,
+    # so no extra download.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+        set(TINYPAD_WEBVIEW2_ARCH "arm64")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|x64")
+        set(TINYPAD_WEBVIEW2_ARCH "x64")
+    else()
+        set(TINYPAD_WEBVIEW2_ARCH "x86")
+    endif()
+
+    add_custom_command(TARGET tinypad POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_BINARY_DIR}/_deps/microsoft_web_webview2-src/build/native/${TINYPAD_WEBVIEW2_ARCH}/WebView2Loader.dll"
+            "$<TARGET_FILE_DIR:tinypad>"
+        COMMENT "Copying WebView2Loader.dll (${TINYPAD_WEBVIEW2_ARCH}) next to tinypad.exe"
+    )
 elseif(APPLE)
     # Audio is a stub (no extra libs there); webview::core_static already
     # pulls in WebKit/Cocoa via webview's own CMake. ApplicationServices is
