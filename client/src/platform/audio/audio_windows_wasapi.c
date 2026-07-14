@@ -294,7 +294,14 @@ static audio_backend_t *wasapi_create(void)
         return NULL;
     }
 
-    rescan_sessions(backend);
+    // Deliberately no initial rescan_sessions() call here: the caller
+    // (mixer_state_create()) wires up on_added/on_updated/on_removed via
+    // set_callbacks() *after* create() returns, so scanning now would find
+    // every already-playing session (e.g. a browser tab opened before this
+    // app started) but silently drop it -- on_added would be NULL, and
+    // every later rescan would then treat it as already-known and never
+    // fire the callback for it at all. Let the first real scan happen
+    // through the normal wasapi_poll() path once callbacks are attached.
     backend->last_enum_tick = GetTickCount64();
 
     return backend;
