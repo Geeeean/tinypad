@@ -11,14 +11,6 @@
 // change" and "frequent level update" without needing
 // IMMNotificationClient/IAudioSessionNotification plumbing.
 
-// INITGUID must be defined before the *first* inclusion of <guiddef.h> in
-// this translation unit -- if anything pulled it in earlier without
-// INITGUID set, DEFINE_GUID's expansion (declare-only vs. actually-define)
-// is locked in for the rest of the file regardless of #define order here.
-// <windows.h> is what actually drags in <guiddef.h>, so it must come
-// first; CMakeLists.txt additionally passes /DINITGUID so this holds even
-// if some other header ends up included before this one.
-#define INITGUID
 #include <windows.h>
 #include <audiopolicy.h>
 #include <endpointvolume.h>
@@ -27,6 +19,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// mmdeviceapi.h/audiopolicy.h/endpointvolume.h only *declare* these as
+// `extern const IID ...` -- on current Windows SDKs, #define INITGUID
+// before including them (the traditional fix) does not reliably make them
+// *defined* for C translation units, only C++ ones (which instead
+// synthesize the value from __uuidof(), sidestepping this entirely). So
+// the actual values are defined here by hand instead of relying on the
+// headers. <initguid.h> forces DEFINE_GUID back into "instantiate" mode
+// regardless of any earlier header's declare-only expansion; values are
+// from the Windows SDK (Core Audio APIs, stable since Vista) and
+// cross-checked against mingw-w64's headers.
+#include <initguid.h>
+DEFINE_GUID(CLSID_MMDeviceEnumerator, 0xbcde0395, 0xe52f, 0x467c, 0x8e, 0x3d, 0xc4, 0x57, 0x92,
+            0x91, 0x69, 0x2e);
+DEFINE_GUID(IID_IMMDeviceEnumerator, 0xa95664d2, 0x9614, 0x4f35, 0xa7, 0x46, 0xde, 0x8d, 0xb6,
+            0x36, 0x17, 0xe6);
+DEFINE_GUID(IID_IAudioSessionManager2, 0x77aa99a0, 0x1bd6, 0x484f, 0x8b, 0xc7, 0x2c, 0x65, 0x4c,
+            0x9a, 0x9b, 0x6f);
+DEFINE_GUID(IID_IAudioSessionControl2, 0xbfb7ff88, 0x7239, 0x4fc9, 0x8f, 0xa2, 0x07, 0xc9, 0x50,
+            0xbe, 0x9c, 0x6d);
+DEFINE_GUID(IID_ISimpleAudioVolume, 0x87ce5498, 0x68d6, 0x44e5, 0x92, 0x15, 0x6d, 0xa4, 0x7e, 0xf8,
+            0x83, 0xd8);
+DEFINE_GUID(IID_IAudioMeterInformation, 0xc02216f6, 0x8c67, 0x4b5b, 0x9d, 0x00, 0xd0, 0x08, 0xe7,
+            0x3e, 0x00, 0x64);
 
 #define MAX_BACKEND_SESSIONS 64
 #define WASAPI_ENUM_INTERVAL_MS 200
