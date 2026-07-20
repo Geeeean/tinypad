@@ -52,6 +52,8 @@ set(TINYPAD_SOURCES
     src/core/device_link.c
     src/ui/ui_bridge.c
     src/platform/com_init.c
+    src/platform/audio/audio_simulated.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/protocol.c
 )
 
 if(WIN32)
@@ -205,6 +207,8 @@ add_executable(tinypad_tests
     src/core/mixer_state.c
     src/core/macro_map.c
     src/core/device_settings.c
+    src/platform/audio/audio_simulated.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/protocol.c
 )
 target_include_directories(tinypad_tests PRIVATE
     include

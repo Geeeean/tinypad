@@ -53,7 +53,7 @@ void USBManager::usb_task(void *pvParameters)
     levels_packet incoming_levels;
     metadata_packet incoming_metadata;
     device_config_packet incoming_device_config;
-    PacketType incoming_type;
+    uint8_t incoming_type;
 
     while (true) {
         if (instance->receive_data(&incoming_levels, &incoming_metadata, &incoming_device_config,
@@ -61,13 +61,13 @@ void USBManager::usb_task(void *pvParameters)
             SemaphoreHandle_t mtx = instance->_config.mutex;
 
             if (mtx != nullptr && xSemaphoreTake(mtx, pdMS_TO_TICKS(5)) == pdTRUE) {
-                if (incoming_type == PacketType::LEVELS &&
+                if (incoming_type == PROTOCOL_PACKET_LEVELS &&
                     instance->_config.shared_levels != nullptr) {
                     *instance->_config.shared_levels = incoming_levels;
-                } else if (incoming_type == PacketType::METADATA &&
+                } else if (incoming_type == PROTOCOL_PACKET_METADATA &&
                           instance->_config.shared_metadata != nullptr) {
                     *instance->_config.shared_metadata = incoming_metadata;
-                } else if (incoming_type == PacketType::DEVICE_CONFIG &&
+                } else if (incoming_type == PROTOCOL_PACKET_DEVICE_CONFIG &&
                           instance->_config.shared_device_config != nullptr) {
                     *instance->_config.shared_device_config = incoming_device_config;
                 }
@@ -80,7 +80,7 @@ void USBManager::usb_task(void *pvParameters)
 }
 
 bool USBManager::receive_data(levels_packet *out_levels, metadata_packet *out_metadata,
-                              device_config_packet *out_device_config, PacketType *out_type)
+                              device_config_packet *out_device_config, uint8_t *out_type)
 {
     uint8_t byte;
     while (tud_cdc_n_read(0, &byte, 1) == 1) {
@@ -105,19 +105,18 @@ bool USBManager::receive_data(levels_packet *out_levels, metadata_packet *out_me
         // PROTOCOL_FEED_COMPLETE: reader->buffer[0..size) holds a validated
         // packet. protocol_reader_feed() already reset the framing state for
         // the next call, but leaves the buffer contents intact for us here.
-        PacketType packet_type = static_cast<PacketType>(type);
         bool ok = false;
 
-        if (packet_type == PacketType::LEVELS) {
-            ok = Protocol::parse_levels_packet(_reader.buffer, size, out_levels);
-        } else if (packet_type == PacketType::METADATA) {
-            ok = Protocol::parse_metadata_packet(_reader.buffer, size, out_metadata);
-        } else if (packet_type == PacketType::DEVICE_CONFIG) {
-            ok = Protocol::parse_device_config_packet(_reader.buffer, size, out_device_config);
+        if (type == PROTOCOL_PACKET_LEVELS) {
+            ok = PROTOCOL_PARSE(type, _reader.buffer, size, out_levels);
+        } else if (type == PROTOCOL_PACKET_METADATA) {
+            ok = PROTOCOL_PARSE(type, _reader.buffer, size, out_metadata);
+        } else if (type == PROTOCOL_PACKET_DEVICE_CONFIG) {
+            ok = PROTOCOL_PARSE(type, _reader.buffer, size, out_device_config);
         }
 
         if (ok) {
-            *out_type = packet_type;
+            *out_type = type;
             return true;
         }
     }

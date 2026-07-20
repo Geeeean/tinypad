@@ -1,16 +1,13 @@
 #pragma once
 
 #include "driver/gpio.h"
-#include "protocol.hpp"
+#include "protocol.h"
 #include <cstdint>
 
 // Reads the 2x4 key matrix and the 4 rotary encoders (CLK/DT/BTN each),
-// debounces/decodes them, and pushes a Command over USB CDC on every
+// debounces/decodes them, and pushes a PROTOCOL_CMD_* over USB CDC on every
 // press/turn. Pin assignments and counts live at the top of the .cpp so a
-// future hardware revision only means editing that table. The current PCB
-// physically wires a 2x5 matrix and a 5th encoder (COL_5 / Encoder 5 in the
-// GPIO doc); the next revision drops both, so only 4 columns / 4 encoders
-// are used here.
+// future hardware revision only means editing that table.
 class InputManager {
   public:
     // Hardware shape, public so the pin/command tables in input_manager.cpp
@@ -53,8 +50,8 @@ class InputManager {
     void scan_encoders();
 
     static void process_edge(bool raw_pressed, uint8_t &debounce_count, bool &pressed,
-                             Command command);
-    static void send_command(Command command);
+                             uint8_t command);
+    static void send_command(uint8_t command);
 
     uint8_t _matrix_debounce_count[MATRIX_KEYS] = {0};
     bool _matrix_pressed[MATRIX_KEYS] = {false};

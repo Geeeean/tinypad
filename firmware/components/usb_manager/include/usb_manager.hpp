@@ -1,7 +1,7 @@
 #pragma once
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "protocol.hpp"
+#include "protocol.h"
 
 class USBManager {
   public:
@@ -18,7 +18,7 @@ class USBManager {
   private:
     static void usb_task(void *pvParameters);
     bool receive_data(levels_packet *out_levels, metadata_packet *out_metadata,
-                      device_config_packet *out_device_config, PacketType *out_type);
+                      device_config_packet *out_device_config, uint8_t *out_type);
 
     Config _config;
 

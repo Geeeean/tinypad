@@ -70,37 +70,29 @@ int main(int argc, char **argv)
                 "TINYPAD_DEVICE) -- running with UI/audio only\n");
     }
 
+    int exit_code = 1;
+
     ctx.bridge = ui_bridge_create(mixer, macros, settings);
     if (!ctx.bridge) {
         fprintf(stderr, "tinypad: failed to create UI window\n");
-        if (ctx.device_link) {
-            device_link_destroy(ctx.device_link);
-        }
-        mixer_state_destroy(mixer);
-        macro_map_destroy(macros);
-        device_settings_destroy(settings);
-        return 1;
+        goto cleanup;
     }
 
     thread_t worker;
     if (!thread_start(&worker, background_loop, &ctx)) {
         fprintf(stderr, "tinypad: failed to start background polling thread\n");
         ui_bridge_destroy(ctx.bridge);
-        if (ctx.device_link) {
-            device_link_destroy(ctx.device_link);
-        }
-        mixer_state_destroy(mixer);
-        macro_map_destroy(macros);
-        device_settings_destroy(settings);
-        return 1;
+        goto cleanup;
     }
 
     ui_bridge_run(ctx.bridge); // blocks on this (main) thread until the window closes
 
     atomic_store(&ctx.running, false);
     thread_join(worker);
-
     ui_bridge_destroy(ctx.bridge);
+    exit_code = 0;
+
+cleanup:
     if (ctx.device_link) {
         device_link_destroy(ctx.device_link);
     }
@@ -109,5 +101,5 @@ int main(int argc, char **argv)
     device_settings_destroy(settings);
     platform_com_uninit();
 
-    return 0;
+    return exit_code;
 }

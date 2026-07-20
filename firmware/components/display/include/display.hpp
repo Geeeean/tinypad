@@ -6,5 +6,5 @@
 class Display {
 public:
     static void init();
-    static lgfx::LGFX_Device& get_device(); 
+    static lgfx::LGFX_Device& get_device();
 };

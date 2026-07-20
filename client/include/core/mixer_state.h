@@ -19,6 +19,7 @@ typedef struct {
     char name[CHANNEL_NAME_LEN]; // truncated copy of the session name
     uint8_t volume;              // 0-100, wire scale
     uint8_t peak;                // 0-100, wire scale
+    bool muted;
 } mixer_slot_t;
 
 typedef struct mixer_state mixer_state_t;
@@ -28,6 +29,14 @@ typedef struct mixer_state mixer_state_t;
 // itself, just the backend instance it creates from it.
 mixer_state_t *mixer_state_create(const audio_backend_vtable_t *backend_vtable);
 void mixer_state_destroy(mixer_state_t *state);
+
+// Detaches the current backend (destroying it) and attaches a new one
+// created from backend_vtable, e.g. to swap real OS audio for
+// audio_simulated's fake sessions and back. Every known session and slot
+// assignment is cleared as part of the swap, since they belonged to the old
+// backend. Safe to call from a different thread than mixer_state_poll()
+// runs on.
+void mixer_state_set_backend(mixer_state_t *state, const audio_backend_vtable_t *backend_vtable);
 
 // Pumps the underlying audio backend; call from the main loop every tick.
 void mixer_state_poll(mixer_state_t *state);

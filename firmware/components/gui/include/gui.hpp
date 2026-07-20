@@ -2,7 +2,7 @@
 
 #include <cstdint>
 #define LGFX_USE_V1
-#include "protocol.hpp"
+#include "protocol.h"
 #include "usb_manager.hpp"
 #include <LovyanGFX.hpp>
 
@@ -14,35 +14,34 @@ class GUI {
     void start();
 
   private:
-    // Vertical layout of the screen for a single frame, recomputed from
-    // canvas height + graph visibility so sections never overlap.
-    struct Layout {
-        int vu_top;
-        int vu_bars_base;
-        int vu_bar_row_y;
-        int vu_text_y;
-
-        bool show_graph;
-        int graph_top;
-        int graph_bottom;
-
-        int macro_top;
-        int macro_rect_h;
-        int macro_row_gap;
+    // Vertical [top, bottom) slice a single dashboard piece draws into for
+    // this frame.
+    struct Bounds {
+        int top;
+        int bottom;
     };
 
-    static Layout compute_layout(int canvas_height, bool show_graph);
+    // One slice per GUI_COMPONENT_* id, indexed by id; only entries named by
+    // an enabled slot in the frame's gui_layout are meaningful. Stacks
+    // enabled components top-to-bottom in gui_layout's order: the two
+    // fixed-height pieces (waveform, macro grid) keep their usual size
+    // wherever they land in the order, and VU meters -- wherever it lands --
+    // takes whatever vertical space is left over.
+    struct Layout {
+        Bounds bounds[GUI_COMPONENT_COUNT];
+    };
+
+    static Layout compute_layout(int canvas_height,
+                                 const uint8_t gui_layout[GUI_COMPONENT_COUNT]);
 
     // The main loop running inside the FreeRTOS task
     static void gui_task(void *pvParameters);
 
     // Specific layout rendering functions (Drawing into the RAM sprite)
-    void draw_top_bar(lgfx::LGFX_Sprite &canvas, int unit);
-    void draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channels,
-                        const metadata_packet &metadata, const Layout &layout);
-    void draw_system_stats(lgfx::LGFX_Sprite &canvas, int unit);
-    void draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout);
-    void draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout,
+    void draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
+                        const channel_level *channels, const metadata_packet &metadata);
+    void draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Bounds &bounds);
+    void draw_macro_label(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
                           const device_config_packet &device_config);
 
     USBManager::Config _config;

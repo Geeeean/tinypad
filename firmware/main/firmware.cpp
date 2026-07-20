@@ -3,7 +3,6 @@
 #include "gui.hpp"
 #include "input_manager.hpp"
 #include "usb_manager.hpp"
-#include <stdio.h>
 
 static levels_packet shared_levels;
 static metadata_packet shared_metadata;
@@ -30,8 +29,6 @@ extern "C" void app_main(void)
     shared_config.shared_device_config = &shared_device_config;
     shared_config.mutex = shared_mutex;
 
-    // usb_manager.init() installs the TinyUSB driver; input_manager's task
-    // writes CDC packets, so it must start only after that driver exists.
     usb_manager.init(shared_config);
     gui.init(shared_config);
     input_manager.init();
@@ -40,8 +37,5 @@ extern "C" void app_main(void)
     usb_manager.start();
     input_manager.start();
 
-    while (true) {
-        printf("CIAO\n");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    vTaskDelete(nullptr);
 }

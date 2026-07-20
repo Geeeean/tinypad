@@ -7,7 +7,7 @@
 struct device_settings {
     mutex_t lock;
     char macro_labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN];
-    bool show_graph;
+    uint8_t gui_layout[GUI_COMPONENT_COUNT];
 };
 
 device_settings_t *device_settings_create(void)
@@ -17,7 +17,12 @@ device_settings_t *device_settings_create(void)
         return NULL;
     }
     mutex_init(&settings->lock);
-    settings->show_graph = true;
+    // All three pieces on, original order. calloc's zero-init isn't enough
+    // here: 0 is GUI_COMPONENT_VU_METERS, not "unset" (GUI_COMPONENT_NONE is
+    // 0xFF), so this has to be set explicitly.
+    settings->gui_layout[0] = GUI_COMPONENT_VU_METERS;
+    settings->gui_layout[1] = GUI_COMPONENT_WAVEFORM;
+    settings->gui_layout[2] = GUI_COMPONENT_MACRO_GRID;
     return settings;
 }
 
@@ -52,30 +57,31 @@ void device_settings_get_macro_label(device_settings_t *settings, int index, cha
     mutex_unlock(&settings->lock);
 }
 
-void device_settings_set_show_graph(device_settings_t *settings, bool show)
+void device_settings_set_gui_layout(device_settings_t *settings,
+                                    const uint8_t layout[GUI_COMPONENT_COUNT])
 {
     mutex_lock(&settings->lock);
-    settings->show_graph = show;
+    memcpy(settings->gui_layout, layout, sizeof(settings->gui_layout));
+    protocol_normalize_gui_layout(settings->gui_layout);
     mutex_unlock(&settings->lock);
 }
 
-bool device_settings_get_show_graph(device_settings_t *settings)
+void device_settings_get_gui_layout(device_settings_t *settings, uint8_t out[GUI_COMPONENT_COUNT])
 {
     mutex_lock(&settings->lock);
-    bool show = settings->show_graph;
+    memcpy(out, settings->gui_layout, sizeof(settings->gui_layout));
     mutex_unlock(&settings->lock);
-    return show;
 }
 
 void device_settings_build_packet(device_settings_t *settings, device_config_packet *out)
 {
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN];
-    uint8_t show_graph;
+    uint8_t gui_layout[GUI_COMPONENT_COUNT];
 
     mutex_lock(&settings->lock);
     memcpy(labels, settings->macro_labels, sizeof(labels));
-    show_graph = settings->show_graph ? 1 : 0;
+    memcpy(gui_layout, settings->gui_layout, sizeof(gui_layout));
     mutex_unlock(&settings->lock);
 
-    protocol_build_device_config_packet(out, labels, show_graph);
+    protocol_build_device_config_packet(out, labels, gui_layout);
 }

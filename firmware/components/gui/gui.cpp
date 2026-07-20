@@ -3,20 +3,15 @@
 #include "esp_log.h"
 #include "lgfx/v1/misc/colortype.hpp"
 #include "lgfx/v1/misc/enum.hpp"
-#include "protocol.hpp"
+#include "protocol.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <iomanip>
-#include <random>
-#include <sstream>
 #include <string>
 
 #define PADDING 12
-#define PADDING_INNER 5
-#define BORDER_WIDTH 1
 
 static const char *TAG = "GUI";
 static constexpr int AUDIO_GRAPH_SAMPLES = 250;
@@ -37,49 +32,79 @@ static int channel_column_x(int channel_index, int column_width)
     return PADDING + channel_index * (column_width + CHANNEL_COLUMN_GAP);
 }
 
-// Lays out the screen top-to-bottom: VU meters, then (if enabled) the
-// waveform graph, then the macro grid pinned to the bottom. Each section's
-// size is derived here so none of the draw_* functions hardcode positions
-// that could drift out of sync with each other.
-GUI::Layout GUI::compute_layout(int canvas_height, bool show_graph)
+// Vertical gap left between two consecutive stacked components.
+static constexpr int SECTION_GAP = 8;
+
+static constexpr int MACRO_ROWS = 2;
+static constexpr int MACRO_RECT_H = 14;
+static constexpr int MACRO_ROW_GAP = 4;
+static constexpr int MACRO_BLOCK_H = MACRO_ROWS * MACRO_RECT_H + (MACRO_ROWS - 1) * MACRO_ROW_GAP;
+
+static constexpr int GRAPH_H = 56;
+
+// Fixed height for a component, or -1 for the one flexible component (VU
+// meters) that takes whatever vertical space the fixed-height ones leave
+// behind, wherever it lands in the configured order.
+static int fixed_height_for(uint8_t component_id)
 {
-    constexpr int SECTION_GAP = 8;
-    constexpr int MACRO_ROWS = 2;
-    constexpr int MACRO_RECT_H = 14;
-    constexpr int MACRO_ROW_GAP = 4;
-    constexpr int VU_TEXT_H = 12;
-    constexpr int VU_TEXT_GAP = 3;
-    constexpr int VU_VOL_BAR_H = 5;
-    constexpr int VU_VOL_BAR_GAP = 4;
-    constexpr int GRAPH_H = 56;
+    switch (component_id) {
+    case GUI_COMPONENT_WAVEFORM:
+        return GRAPH_H;
+    case GUI_COMPONENT_MACRO_GRID:
+        return MACRO_BLOCK_H;
+    default:
+        return -1;
+    }
+}
 
+// Stacks the enabled components in gui_layout's order, top to bottom.
+// gui_layout is expected to already be normalized (GUI::init/gui_task both
+// run it through protocol_normalize_gui_layout), so this trusts it: every
+// entry is either GUI_COMPONENT_NONE or a distinct, in-range id.
+//
+// Two passes because the flexible component's height depends on the total
+// fixed height of every *other* enabled component, which isn't known until
+// all of them have been seen -- and it can land anywhere in the order, so a
+// single forward pass can't allocate its slice as it goes.
+GUI::Layout GUI::compute_layout(int canvas_height, const uint8_t gui_layout[GUI_COMPONENT_COUNT])
+{
     Layout layout{};
-    layout.show_graph = show_graph;
 
-    const int macro_block_h = MACRO_ROWS * MACRO_RECT_H + (MACRO_ROWS - 1) * MACRO_ROW_GAP;
-    const int macro_bottom = canvas_height - PADDING;
-    layout.macro_top = macro_bottom - macro_block_h;
-    layout.macro_rect_h = MACRO_RECT_H;
-    layout.macro_row_gap = MACRO_ROW_GAP;
+    int enabled_count = 0;
+    int fixed_total = 0;
+    bool vu_enabled = false;
 
-    const int content_top = PADDING;
-    const int content_bottom = layout.macro_top - SECTION_GAP;
-
-    int vu_bottom;
-    if (show_graph) {
-        layout.graph_bottom = content_bottom;
-        layout.graph_top = layout.graph_bottom - GRAPH_H;
-        vu_bottom = layout.graph_top - SECTION_GAP;
-    } else {
-        layout.graph_top = 0;
-        layout.graph_bottom = 0;
-        vu_bottom = content_bottom;
+    for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
+        uint8_t id = gui_layout[i];
+        if (id == GUI_COMPONENT_NONE) {
+            continue;
+        }
+        enabled_count++;
+        int fixed_h = fixed_height_for(id);
+        if (fixed_h < 0) {
+            vu_enabled = true;
+        } else {
+            fixed_total += fixed_h;
+        }
     }
 
-    layout.vu_top = content_top;
-    layout.vu_text_y = vu_bottom - VU_TEXT_H;
-    layout.vu_bar_row_y = layout.vu_text_y - VU_TEXT_GAP - VU_VOL_BAR_H;
-    layout.vu_bars_base = layout.vu_bar_row_y - VU_VOL_BAR_GAP;
+    int gaps = enabled_count > 0 ? (enabled_count - 1) * SECTION_GAP : 0;
+    int available = canvas_height - 2 * PADDING - gaps;
+    int vu_height = vu_enabled ? std::max(0, available - fixed_total) : 0;
+
+    int y = PADDING;
+    for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
+        uint8_t id = gui_layout[i];
+        if (id == GUI_COMPONENT_NONE) {
+            continue;
+        }
+
+        int fixed_h = fixed_height_for(id);
+        int h = fixed_h < 0 ? vu_height : fixed_h;
+
+        layout.bounds[id] = {y, y + h};
+        y += h + SECTION_GAP;
+    }
 
     return layout;
 }
@@ -96,8 +121,11 @@ void GUI::init(USBManager::Config config)
     }
     if (_config.shared_device_config != nullptr) {
         std::memset(_config.shared_device_config, 0, sizeof(device_config_packet));
-        // Graph is on by default until the host sends its own preference.
-        _config.shared_device_config->show_graph = 1;
+        // All three pieces on, original order, until the host sends its own
+        // preference.
+        _config.shared_device_config->gui_layout[0] = GUI_COMPONENT_VU_METERS;
+        _config.shared_device_config->gui_layout[1] = GUI_COMPONENT_WAVEFORM;
+        _config.shared_device_config->gui_layout[2] = GUI_COMPONENT_MACRO_GRID;
     }
 }
 
@@ -105,11 +133,8 @@ void GUI::start()
 {
     ESP_LOGI(TAG, "Launching GUI Component thread...");
 
-    BaseType_t ret = xTaskCreatePinnedToCore(GUI::gui_task, "gui_task", 8192,
-                                             this,
-                                             1, nullptr,
-                                             1 
-    );
+    BaseType_t ret =
+        xTaskCreatePinnedToCore(GUI::gui_task, "gui_task", 8192, this, 1, nullptr, 1);
 
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create GUI Task!");
@@ -123,7 +148,6 @@ int get_smoothed_output_level(const unsigned char *levels, int channels,
         return 0;
     }
 
-
     float sum_squares = 0.0f;
     for (int i = 0; i < channels; i++) {
         float vol = static_cast<float>(levels[i]);
@@ -136,7 +160,6 @@ int get_smoothed_output_level(const unsigned char *levels, int channels,
     constexpr float alpha = 0.9f;
     smoothed_volume = smoothed_volume + alpha * (rms_volume - smoothed_volume);
 
-    
     int final_volume = static_cast<int>(std::round(smoothed_volume));
     return std::max(0, std::min(100, final_volume));
 }
@@ -145,7 +168,6 @@ void GUI::gui_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "GUI Task running on Core 1.");
 
-    
     GUI *instance = static_cast<GUI *>(pvParameters);
 
     auto &tft = Display::get_device();
@@ -163,13 +185,14 @@ void GUI::gui_task(void *pvParameters)
 
     float smoothed_volume = 0.0f;
 
-    int i = 0;
-
     while (true) {
-        levels_packet local_levels = {0};
-        metadata_packet local_metadata = {0};
-        device_config_packet local_device_config = {0};
-        local_device_config.show_graph = 1; // matches GUI::init()'s default
+        levels_packet local_levels = {};
+        metadata_packet local_metadata = {};
+        device_config_packet local_device_config = {};
+        // Matches GUI::init()'s default: all three pieces on, original order.
+        local_device_config.gui_layout[0] = GUI_COMPONENT_VU_METERS;
+        local_device_config.gui_layout[1] = GUI_COMPONENT_WAVEFORM;
+        local_device_config.gui_layout[2] = GUI_COMPONENT_MACRO_GRID;
 
         SemaphoreHandle_t mtx = instance->_config.mutex;
 
@@ -190,6 +213,12 @@ void GUI::gui_task(void *pvParameters)
 
             xSemaphoreGive(mtx);
         }
+
+        // A packet fresh off the wire hasn't necessarily been through
+        // protocol_normalize_gui_layout (only protocol_build_device_config_packet
+        // guarantees that) -- normalize the local copy so compute_layout and
+        // the draw loop below can both trust it.
+        protocol_normalize_gui_layout(local_device_config.gui_layout);
 
         if (!is_woke_up) {
             canvas.fillScreen(TFT_BLACK);
@@ -224,15 +253,27 @@ void GUI::gui_task(void *pvParameters)
             audio_history[AUDIO_GRAPH_SAMPLES - 1] =
                 get_smoothed_output_level(output_levels, MIXER_CHANNELS, smoothed_volume);
 
-            Layout layout = compute_layout(h, local_device_config.show_graph != 0);
+            Layout layout = compute_layout(h, local_device_config.gui_layout);
 
             canvas.fillScreen(TFT_BLACK);
-            instance->draw_audio_waveform(canvas, layout);
-            instance->draw_macro_label(canvas, layout, local_device_config);
-            instance->draw_vu_meters(canvas, local_levels.channels, local_metadata, layout);
+            for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
+                uint8_t id = local_device_config.gui_layout[i];
+                switch (id) {
+                case GUI_COMPONENT_VU_METERS:
+                    instance->draw_vu_meters(canvas, layout.bounds[id], local_levels.channels,
+                                             local_metadata);
+                    break;
+                case GUI_COMPONENT_WAVEFORM:
+                    instance->draw_audio_waveform(canvas, layout.bounds[id]);
+                    break;
+                case GUI_COMPONENT_MACRO_GRID:
+                    instance->draw_macro_label(canvas, layout.bounds[id], local_device_config);
+                    break;
+                default:
+                    break; // GUI_COMPONENT_NONE: this slot is disabled
+                }
+            }
         }
-
-        i = (i + 1) % 3;
 
         tft.startWrite();
         canvas.pushSprite(&tft, 0, 0);
@@ -243,90 +284,68 @@ void GUI::gui_task(void *pvParameters)
     }
 }
 
-void GUI::draw_top_bar(lgfx::LGFX_Sprite &canvas, int unit)
+// Scales an RGB565 color's brightness by `factor` (0-1), e.g. 0.8 for an
+// ~80%-opacity look against this UI's black background -- blending a color
+// with black at alpha a is just color*a, so no actual alpha compositing is
+// needed here.
+static uint16_t dim_color565(uint16_t color, float factor)
 {
-    const int w  = canvas.width();
-    const int cy = 15;                 
-    const int box_h     = 14;
-    const int box_gap   = 6;
-    const int inner_pad = 5;
-    const int circle_r   = 3;
-    const int circle_gap = 4;
-
-    const int text_col   = TFT_GRAY;
-    const int box_border = canvas.color565(40, 40, 40);
-    const int live_green = canvas.color565(0, 200, 80);
-
-    
-    canvas.setFont(&fonts::efontCN_12_b);
-    canvas.setTextSize(1.0f);
-    canvas.setTextColor(TFT_SILVER);
-    canvas.setTextDatum(lgfx::textdatum_t::middle_left);
-    canvas.drawString("TINYPAD", PADDING, cy);
-
-    
-    canvas.setFont(&fonts::efontCN_12);
-    canvas.setTextColor(text_col);
-    canvas.setTextDatum(lgfx::textdatum_t::middle_right);
-    std::string clock_str = "12:34";   
-    canvas.drawString(clock_str.c_str(), w - PADDING, cy);
-
-    
-    int cpu = 0, ram = 0;              
-    std::string cpu_str  = "CPU " + std::to_string(cpu) + "%";
-    std::string ram_str  = "RAM " + std::to_string(ram) + "%";
-    std::string live_str = "LIVE";
-
-    
-    int cpu_w  = canvas.textWidth(cpu_str.c_str())  + 2 * inner_pad;
-    int ram_w  = canvas.textWidth(ram_str.c_str())  + 2 * inner_pad;
-    int live_w = circle_r * 2 + circle_gap + canvas.textWidth(live_str.c_str()) + 2 * inner_pad;
-
-    int group_w = cpu_w + ram_w + live_w + 2 * box_gap;
-    int x = (w - group_w) / 2;          
-
-    auto draw_box = [&](int bx, int bw, const std::string &s, bool live) {
-        canvas.drawRect(bx, cy - box_h / 2, bw, box_h, box_border);   
-        int tx = bx + inner_pad;
-        if (live) {
-            int ccx = bx + inner_pad + circle_r;
-            canvas.fillSmoothCircle(ccx, cy, circle_r, live_green);
-            tx = ccx + circle_r + circle_gap;
-        }
-        canvas.setTextColor(text_col);
-        canvas.setTextDatum(lgfx::textdatum_t::middle_left);
-        canvas.drawString(s.c_str(), tx, cy);
-    };
-
-    draw_box(x, cpu_w,  cpu_str,  false); x += cpu_w  + box_gap;
-    draw_box(x, ram_w,  ram_str,  false); x += ram_w  + box_gap;
-    draw_box(x, live_w, live_str, true);
-
-    canvas.setTextDatum(lgfx::textdatum_t::top_left);
+    uint16_t r = (color >> 11) & 0x1F;
+    uint16_t g = (color >> 5) & 0x3F;
+    uint16_t b = color & 0x1F;
+    r = (uint16_t)(r * factor);
+    g = (uint16_t)(g * factor);
+    b = (uint16_t)(b * factor);
+    return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+// Shortens text with a trailing "..." until it fits max_width, so a long
+// channel name can never overlap the volume percentage drawn to its right.
+// Assumes the canvas's font/size are already set to whatever they'll be
+// drawn with.
+static std::string truncate_to_width(lgfx::LGFX_Sprite &canvas, const std::string &text,
+                                     int max_width)
+{
+    if (canvas.textWidth(text.c_str()) <= max_width) {
+        return text;
+    }
 
-void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channels,
-                         const metadata_packet &metadata, const Layout &layout)
+    static constexpr const char *ELLIPSIS = "...";
+    for (int len = (int)text.size() - 1; len > 0; len--) {
+        std::string candidate = text.substr(0, len) + ELLIPSIS;
+        if (canvas.textWidth(candidate.c_str()) <= max_width) {
+            return candidate;
+        }
+    }
+    return ELLIPSIS;
+}
+
+void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
+                         const channel_level *channels, const metadata_packet &metadata)
 {
     static float disp_level[MIXER_CHANNELS][2] = {{0}};
+
+    constexpr int VU_TEXT_H = 12;
+    constexpr int VU_TEXT_GAP = 3;
+    constexpr int VU_VOL_BAR_H = 5;
+    constexpr int VU_VOL_BAR_GAP = 4;
 
     const int w = canvas.width();
     const int count = MIXER_CHANNELS;
     const int sub_ch = 2;
     const int sub_gap = 2;
 
-    const int bars_top = layout.vu_top;
-    const int bars_base = layout.vu_bars_base;
+    const int text_y = bounds.bottom - VU_TEXT_H;
+    const int vol_bar_y = text_y - VU_TEXT_GAP - VU_VOL_BAR_H;
+    const int bars_base = vol_bar_y - VU_VOL_BAR_GAP;
+    const int bars_top = bounds.top;
     const int bar_h_max = bars_base - bars_top;
 
     const int seg_count = 16;
     const int seg_gap = 1;
     const int seg_h = (bar_h_max - (seg_count - 1) * seg_gap) / seg_count;
 
-    const int vol_bar_y = layout.vu_bar_row_y;
-    const int vol_bar_h = 5;
-    const int text_y = layout.vu_text_y;
+    const int vol_bar_h = VU_VOL_BAR_H;
 
     const int track_color = canvas.color565(40, 40, 40);
     const int green = canvas.color565(0, 200, 80);
@@ -338,9 +357,8 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
     const float up_step = 22.0f;
     const float down_step = 8.0f;
 
-    
     const float green_max = 0.50f;
-    const float orange_max = 0.70f; 
+    const float orange_max = 0.70f;
 
     const int col_w = channel_column_width(w);
     const int bar_w = (col_w - sub_gap) / 2;
@@ -348,8 +366,14 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
     canvas.setFont(&fonts::efontCN_12);
     canvas.setTextSize(1.0f);
 
+    // Applied to every element of a muted channel's column (segments, volume
+    // bar, name, percentage) so mute reads as clearly and immediately as
+    // possible at a glance, not just a subtle change to one piece of it.
+    constexpr float MUTED_OPACITY = 0.45f;
+
     for (int i = 0; i < count; i++) {
         int col_x = channel_column_x(i, col_w);
+        bool muted = channels[i].muted != 0;
 
         const uint8_t stereo_levels[sub_ch] = {channels[i].left, channels[i].right};
 
@@ -369,7 +393,12 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
             int lit = (int)(lv * seg_count / 100.0f);
 
             for (int s = 0; s < seg_count; s++) {
-                int sy = bars_base - (s + 1) * seg_h - s * seg_gap;
+                // Anchored from bars_top (not bars_base) so the topmost
+                // segment always starts exactly at bounds.top -- any
+                // leftover from seg_h's integer division then lands next
+                // to the volume bar at the bottom, not as extra padding
+                // above the meters.
+                int sy = bars_top + (seg_count - 1 - s) * (seg_h + seg_gap);
                 int col;
                 if (s < lit) {
                     float frac = (s + 1) / (float)seg_count;
@@ -379,13 +408,18 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
                 } else {
                     col = track_color;
                 }
+                if (muted) {
+                    col = dim_color565((uint16_t)col, MUTED_OPACITY);
+                }
                 canvas.fillRect(bx, sy, bar_w, seg_h, col);
             }
         }
 
         int volume = channels[i].volume;
-        canvas.fillRect(col_x, vol_bar_y, col_w, vol_bar_h, track_color);
-        canvas.fillRect(col_x, vol_bar_y, col_w * volume / 100, vol_bar_h, vol_fill);
+        int this_track = muted ? dim_color565((uint16_t)track_color, MUTED_OPACITY) : track_color;
+        int this_vol_fill = muted ? dim_color565((uint16_t)vol_fill, MUTED_OPACITY) : vol_fill;
+        canvas.fillRect(col_x, vol_bar_y, col_w, vol_bar_h, this_track);
+        canvas.fillRect(col_x, vol_bar_y, col_w * volume / 100, vol_bar_h, this_vol_fill);
 
         // metadata.names[i] is a fixed 16-byte field with no guaranteed
         // null terminator (a corrupt/short packet could fill it entirely),
@@ -401,31 +435,36 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const channel_level *channel
             std::strcpy(name_buf, "---");
         }
 
-        canvas.setTextColor(text_col);
+        std::string pct_str = std::to_string(volume) + "%";
+        int pct_w = canvas.textWidth(pct_str.c_str());
+        constexpr int NAME_PCT_GAP = 4;
+        std::string display_name =
+            truncate_to_width(canvas, name_buf, col_w - pct_w - NAME_PCT_GAP);
+
+        int this_text_col = muted ? dim_color565((uint16_t)text_col, MUTED_OPACITY) : text_col;
+        canvas.setTextColor(this_text_col);
         canvas.setTextDatum(lgfx::textdatum_t::top_left);
-        canvas.drawString(name_buf, col_x, text_y);
+        canvas.drawString(display_name.c_str(), col_x, text_y);
         canvas.setTextDatum(lgfx::textdatum_t::top_right);
-        canvas.drawString((std::to_string(volume) + "%").c_str(), col_x + col_w, text_y);
+        canvas.drawString(pct_str.c_str(), col_x + col_w, text_y);
     }
 
     canvas.setTextDatum(lgfx::textdatum_t::top_left);
 }
 
-void GUI::draw_system_stats(lgfx::LGFX_Sprite &canvas, int unit) {}
-
-void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout,
+void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
                            const device_config_packet &device_config)
 {
     const int w = canvas.width();
 
     constexpr int cols = MIXER_CHANNELS;
-    constexpr int rows = 2;
+    constexpr int rows = MACRO_ROWS;
     constexpr int macro_count = rows * cols;
     static_assert(macro_count == MACRO_BUTTON_COUNT,
                   "macro grid geometry no longer matches the wire protocol's label count");
 
-    const int row_gap = layout.macro_row_gap;
-    const int rect_h = layout.macro_rect_h;
+    const int row_gap = MACRO_ROW_GAP;
+    const int rect_h = MACRO_RECT_H;
 
     const int rect_w = channel_column_width(w);
 
@@ -439,7 +478,7 @@ void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout,
         int col = i % cols;
 
         int x = channel_column_x(col, rect_w);
-        int y = layout.macro_top + row * (rect_h + row_gap);
+        int y = bounds.top + row * (rect_h + row_gap);
 
         canvas.fillRect(x, y, rect_w, rect_h, TFT_GRAY);
 
@@ -455,15 +494,11 @@ void GUI::draw_macro_label(lgfx::LGFX_Sprite &canvas, const Layout &layout,
     canvas.setTextDatum(lgfx::textdatum_t::top_left);
 }
 
-void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
+void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Bounds &bounds)
 {
-    if (!layout.show_graph) {
-        return;
-    }
-
     const int scale = 2; // horizontal pixels per sample
-    const int baseline = layout.graph_bottom;
-    const int plot_h = layout.graph_bottom - layout.graph_top; // vertical pixel range
+    const int baseline = bounds.bottom;
+    const int plot_h = bounds.bottom - bounds.top; // vertical pixel range
     const float thickness = 1.0f;
     const int grid_color = canvas.color565(40, 40, 40);
     const int wave_color = TFT_GRAY;
@@ -474,7 +509,6 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
         return baseline + plot_h * (1.0f - audio_history[idx]) / 100.0f;
     };
 
-    
     canvas.setTextSize(1.2f);
     const int output_w = canvas.textWidth("OUTPUT");
 
@@ -486,10 +520,9 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
     if (samples > AUDIO_GRAPH_SAMPLES)
         samples = AUDIO_GRAPH_SAMPLES;
 
-    
     const int y0 = baseline;
     const int y50 = baseline - plot_h / 2;
-    const int y100 = layout.graph_top;
+    const int y100 = bounds.top;
 
     canvas.drawFastHLine(PADDING, y0, w - PADDING * 2, grid_color);
     canvas.drawFastHLine(x_left, y100, grid_w, grid_color);
@@ -500,7 +533,6 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
         canvas.drawFastHLine(dx, y50, len, grid_color);
     }
 
-    
     float prev_x = 0, prev_y = 0;
     bool have_prev = false;
     for (int n = 0; n < samples; n++) {
@@ -517,7 +549,6 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
         have_prev = true;
     }
 
-    
     int last_val = (int)audio_history[AUDIO_GRAPH_SAMPLES - 1];
     int peak_val = (int)audio_history[0];
     for (int k = 1; k < AUDIO_GRAPH_SAMPLES; k++) {
@@ -526,7 +557,6 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
             peak_val = v;
     }
 
-    
     int cursor_y = y100 - 3;
     auto draw_label = [&](const std::string &s, int color, float size) {
         canvas.setTextColor(color);
@@ -539,5 +569,5 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Layout &layout)
     draw_label(std::to_string(last_val), TFT_GRAY, 2.0f);
     draw_label("PEAK " + std::to_string(peak_val), dark, 1.0f);
 
-    canvas.setTextSize(1.0f); 
+    canvas.setTextSize(1.0f);
 }

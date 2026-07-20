@@ -56,6 +56,28 @@ export const MACRO_KEYSTROKE_MAX_STEPS = 16;
 // each with an on-device label box (encoder buttons have none).
 export const MACRO_BUTTON_COUNT = 8;
 
+// Mirrors the GUI_COMPONENT_* enum in shared/protocol.h: the device
+// dashboard pieces that can be independently enabled and reordered via
+// DeviceSettings.guiLayout.
+export const GuiComponent = {
+  VuMeters: 0,
+  Waveform: 1,
+  MacroGrid: 2,
+} as const;
+export type GuiComponent = (typeof GuiComponent)[keyof typeof GuiComponent];
+
+export const GUI_COMPONENT_LABELS: Record<GuiComponent, string> = {
+  [GuiComponent.VuMeters]: "VU Meters",
+  [GuiComponent.Waveform]: "Waveform",
+  [GuiComponent.MacroGrid]: "Macro Grid",
+};
+
+// Mirrors GUI_COMPONENT_COUNT in shared/protocol.h.
+export const GUI_COMPONENT_COUNT = 3;
+// Mirrors GUI_COMPONENT_NONE in shared/protocol.h -- a guiLayout slot
+// holding this id is disabled.
+export const GUI_COMPONENT_NONE = 0xff;
+
 export interface AudioSession {
   id: number;
   name: string;
@@ -84,7 +106,9 @@ export interface MacroAction {
 }
 
 export interface DeviceSettings {
-  showGraph: boolean;
+  // Length GUI_COMPONENT_COUNT, GuiComponent ids in draw order (top to
+  // bottom); a slot holding GUI_COMPONENT_NONE disables that piece.
+  guiLayout: number[];
   // Length MACRO_BUTTON_COUNT, index i is Switch (i+1)'s on-device label.
   macroLabels: string[];
 }
@@ -94,6 +118,9 @@ export interface TinypadState {
   slots: MixerSlot[];
   macros: MacroAction[];
   deviceSettings: DeviceSettings;
+  // Whether the mixer's audio source is audio_simulated's fake sessions
+  // (true) or real OS audio (false).
+  simulationEnabled: boolean;
 }
 
 function emptyMacroAction(): MacroAction {
@@ -110,5 +137,9 @@ export const EMPTY_STATE: TinypadState = {
     peak: 0,
   })),
   macros: Array.from({ length: MACRO_TRIGGER_COUNT }, emptyMacroAction),
-  deviceSettings: { showGraph: true, macroLabels: Array(MACRO_BUTTON_COUNT).fill("") },
+  deviceSettings: {
+    guiLayout: [GuiComponent.VuMeters, GuiComponent.Waveform, GuiComponent.MacroGrid],
+    macroLabels: Array(MACRO_BUTTON_COUNT).fill(""),
+  },
+  simulationEnabled: false,
 };

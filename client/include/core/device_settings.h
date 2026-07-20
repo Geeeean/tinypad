@@ -1,10 +1,11 @@
 #pragma once
 
 // Display-facing settings the host pushes to the device: the 8 switch
-// button labels and whether to draw the waveform graph. Separate from
-// macro_map (which owns *behavior*, not labels) and mixer_state (which
-// owns audio, not display prefs) -- this is the thing device_link snapshots
-// into a device_config_packet, and what ui_bridge reads/writes from the UI.
+// button labels and which GUI dashboard pieces are enabled, and in what
+// order. Separate from macro_map (which owns *behavior*, not labels) and
+// mixer_state (which owns audio, not display prefs) -- this is the thing
+// device_link snapshots into a device_config_packet, and what ui_bridge
+// reads/writes from the UI.
 
 #include "protocol.h"
 #include <stdbool.h>
@@ -20,8 +21,14 @@ void device_settings_set_macro_label(device_settings_t *settings, int index, con
 void device_settings_get_macro_label(device_settings_t *settings, int index, char *out,
                                      size_t out_size);
 
-void device_settings_set_show_graph(device_settings_t *settings, bool show);
-bool device_settings_get_show_graph(device_settings_t *settings);
+// layout: GUI_COMPONENT_COUNT ids in draw order (top-to-bottom); a slot
+// holding GUI_COMPONENT_NONE disables that piece. Normalized (out-of-range
+// ids and duplicates cleared to GUI_COMPONENT_NONE) on every set and again
+// when the packet is built, so callers never need to pre-validate it.
+void device_settings_set_gui_layout(device_settings_t *settings,
+                                    const uint8_t layout[GUI_COMPONENT_COUNT]);
+void device_settings_get_gui_layout(device_settings_t *settings,
+                                    uint8_t out[GUI_COMPONENT_COUNT]);
 
 // Snapshots current settings into a ready-to-send packet.
 void device_settings_build_packet(device_settings_t *settings, device_config_packet *out);

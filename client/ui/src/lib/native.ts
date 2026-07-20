@@ -3,7 +3,7 @@
 // webview_return(); failures are swallowed here (native side already logs
 // them to stderr) so callers don't need a .catch() at every call site.
 
-import type { KeystrokeStep, TinypadState } from "@/types";
+import { GUI_COMPONENT_COUNT, type KeystrokeStep, type TinypadState } from "@/types";
 
 declare global {
   interface Window {
@@ -13,7 +13,9 @@ declare global {
     native_toggle_slot_mute: (slot: number) => Promise<boolean>;
     native_set_macro: (...args: number[]) => Promise<boolean>;
     native_set_macro_label: (index: number, label: string) => Promise<boolean>;
-    native_set_show_graph: (show: number) => Promise<boolean>;
+    native_set_gui_layout: (...layout: number[]) => Promise<boolean>;
+    native_set_simulation_enabled: (enabled: number) => Promise<boolean>;
+    native_set_simulated_level: (index: number, levelPercent: number) => Promise<boolean>;
     onState?: (state: TinypadState) => void;
   }
 }
@@ -58,8 +60,25 @@ export function setMacroLabel(index: number, label: string): void {
   void window.native_set_macro_label(index, label).catch(ignoreRejection);
 }
 
-export function setShowGraph(show: boolean): void {
-  void window.native_set_show_graph(show ? 1 : 0).catch(ignoreRejection);
+// layout: GUI_COMPONENT_COUNT GuiComponent ids in draw order; GUI_COMPONENT_NONE
+// disables that slot.
+export function setGuiLayout(layout: number[]): void {
+  if (layout.length !== GUI_COMPONENT_COUNT) {
+    throw new Error(`setGuiLayout: expected ${GUI_COMPONENT_COUNT} entries, got ${layout.length}`);
+  }
+  void window.native_set_gui_layout(...layout).catch(ignoreRejection);
+}
+
+// Swaps the mixer's audio source between real OS audio and audio_simulated's
+// fake sessions ("detaching" from OS audio).
+export function setSimulationEnabled(enabled: boolean): void {
+  void window.native_set_simulation_enabled(enabled ? 1 : 0).catch(ignoreRejection);
+}
+
+// index: 0..MIXER_CHANNELS-1 (the simulated sessions), levelPercent: 0-100.
+// Only takes effect while simulation is enabled.
+export function setSimulatedLevel(index: number, levelPercent: number): void {
+  void window.native_set_simulated_level(index, levelPercent).catch(ignoreRejection);
 }
 
 // Registers window.onState (called by ui_bridge_push_state -> webview_eval,

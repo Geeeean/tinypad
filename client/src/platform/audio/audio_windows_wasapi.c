@@ -158,30 +158,24 @@ static void rescan_sessions(audio_backend_t *backend)
     }
 
     IAudioSessionEnumerator *session_enum = NULL;
-    HRESULT hr_enum = backend->session_manager->lpVtbl->GetSessionEnumerator(
-        backend->session_manager, &session_enum);
-    if (FAILED(hr_enum)) {
-        fprintf(stderr, "wasapi: GetSessionEnumerator failed hr=0x%08lx\n", (unsigned long)hr_enum);
+    if (FAILED(backend->session_manager->lpVtbl->GetSessionEnumerator(backend->session_manager,
+                                                                       &session_enum))) {
         return;
     }
 
     int count = 0;
-    HRESULT hr_count = session_enum->lpVtbl->GetCount(session_enum, &count);
-    fprintf(stderr, "wasapi: GetCount hr=0x%08lx count=%d\n", (unsigned long)hr_count, count);
+    session_enum->lpVtbl->GetCount(session_enum, &count);
 
     bool seen[MAX_BACKEND_SESSIONS] = {0};
 
     for (int i = 0; i < count; i++) {
         IAudioSessionControl *control = NULL;
-        HRESULT hr_get = session_enum->lpVtbl->GetSession(session_enum, i, &control);
-        if (FAILED(hr_get) || !control) {
-            fprintf(stderr, "wasapi: [%d] GetSession failed hr=0x%08lx\n", i, (unsigned long)hr_get);
+        if (FAILED(session_enum->lpVtbl->GetSession(session_enum, i, &control)) || !control) {
             continue;
         }
 
         AudioSessionState state;
         control->lpVtbl->GetState(control, &state);
-        fprintf(stderr, "wasapi: [%d] state=%d\n", i, (int)state);
 
         IAudioSessionControl2 *control2 = NULL;
         control->lpVtbl->QueryInterface(control, &IID_IAudioSessionControl2, (void **)&control2);
@@ -192,10 +186,8 @@ static void rescan_sessions(audio_backend_t *backend)
 
         DWORD pid = 0;
         control2->lpVtbl->GetProcessId(control2, &pid);
-        fprintf(stderr, "wasapi: [%d] pid=%lu\n", i, (unsigned long)pid);
 
         if (state == AudioSessionStateExpired || pid == 0) {
-            fprintf(stderr, "wasapi: [%d] skipped (expired or pid 0)\n", i);
             control2->lpVtbl->Release(control2);
             continue;
         }
@@ -244,8 +236,6 @@ static void rescan_sessions(audio_backend_t *backend)
 
         seen[slot_index] = true;
 
-        fprintf(stderr, "wasapi: [%d] added name='%s' on_added=%p\n", i, slot->name,
-                (void *)backend->on_added);
         if (backend->on_added) {
             audio_session_t snapshot;
             build_session_snapshot(slot, &snapshot);

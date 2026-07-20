@@ -1,4 +1,6 @@
 #include "ui/ui_bridge.h"
+#include "platform/audio_backend.h"
+#include "platform/audio_simulated.h"
 #include "protocol.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,15 +26,13 @@ struct ui_bridge {
     mixer_state_t *mixer;
     macro_map_t *macros;
     device_settings_t *settings;
+    bool simulation_enabled;
 };
 
-// --- tiny string-builder + JSON helpers -------------------------------
-// No JSON library is vendored: the data model here is flat records of
-// numbers/short strings, so hand-rolled building/escaping is simpler than a
-// dependency. Session/app names are untrusted (they come from the OS audio
-// stack) and end up inside a webview_eval() JS call, so escaping them
-// correctly matters -- an unescaped quote or backslash could break out of
-// the JSON string literal and inject script.
+// --- tiny string-builder + JSON helpers ---------------------------------
+// No JSON library vendored -- the data model is flat enough that hand-rolled
+// building/escaping is simpler. Session/app names come from the OS audio
+// stack (untrusted) and are eval'd as JS, so escaping must be correct.
 
 typedef struct {
     char *buf;
@@ -126,26 +126,28 @@ static void build_state_json(ui_bridge_t *bridge, strbuf_t *sb)
         sb_appendf(sb, "]}");
     }
 
-    sb_appendf(sb, "],\"deviceSettings\":{\"showGraph\":%s,\"macroLabels\":[",
-              device_settings_get_show_graph(bridge->settings) ? "true" : "false");
+    sb_appendf(sb, "],\"deviceSettings\":{\"guiLayout\":[");
+    {
+        uint8_t layout[GUI_COMPONENT_COUNT];
+        device_settings_get_gui_layout(bridge->settings, layout);
+        for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
+            if (i) sb_appendf(sb, ",");
+            sb_appendf(sb, "%u", layout[i]);
+        }
+    }
+    sb_appendf(sb, "],\"macroLabels\":[");
     for (int i = 0; i < MACRO_BUTTON_COUNT; i++) {
         if (i) sb_appendf(sb, ",");
         char label[MACRO_LABEL_LEN];
         device_settings_get_macro_label(bridge->settings, i, label, sizeof(label));
         sb_append_json_string(sb, label);
     }
-    sb_appendf(sb, "]}}");
+    sb_appendf(sb, "]},\"simulationEnabled\":%s}", bridge->simulation_enabled ? "true" : "false");
 }
 
-// ui_bridge_push_state() is called from main.c's background polling thread,
-// but webview_eval() ultimately calls into a native UI object (WebView2's
-// ICoreWebView2::ExecuteScript on Windows, an STA-affinitized COM object
-// tied to the thread that created it) that isn't safe to touch from any
-// other thread. webview_dispatch() marshals the call onto the thread
-// actually running the UI event loop instead -- this is the *documented*
-// way to do this, not a workaround. WKWebView/GTK tolerated the direct
-// cross-thread call well enough that this went unnoticed through all of
-// this project's macOS/Linux testing; WebView2 does not.
+// push_state runs on the background polling thread, but webview_eval() must
+// run on the UI thread (WebView2's ExecuteScript is STA-affinitized).
+// webview_dispatch() marshals the call over.
 static void dispatched_eval(webview_t w, void *arg)
 {
     char *js = arg;
@@ -164,21 +166,8 @@ void ui_bridge_push_state(ui_bridge_t *bridge)
     sb_init(&sb, json_buf, sizeof(json_buf));
     build_state_json(bridge, &sb);
 
-    static int last_logged_session_count = -1;
-    audio_session_t probe[MIXER_MAX_SESSIONS];
-    int n = (int)mixer_state_list_sessions(bridge->mixer, probe, MIXER_MAX_SESSIONS);
-    if (n != last_logged_session_count) {
-        fprintf(stderr, "ui_bridge: session count changed %d -> %d, json=%s\n",
-                last_logged_session_count, n, json_buf);
-        last_logged_session_count = n;
-    }
-
-    char js_buf[16384 + 128];
-    snprintf(js_buf, sizeof(js_buf),
-             "try { window.onState && window.onState(%s); } "
-             "catch (e) { window.native_js_error && "
-             "window.native_js_error(String((e && e.stack) || e)); }",
-             json_buf);
+    char js_buf[16384 + 64];
+    snprintf(js_buf, sizeof(js_buf), "window.onState && window.onState(%s)", json_buf);
 
     size_t js_len = strlen(js_buf) + 1;
     char *js_copy = malloc(js_len);
@@ -211,10 +200,8 @@ static int parse_int_args(const char *req, long *out, int max_count)
     return count;
 }
 
-// Parses a `[<int>,"<string>"]` request: native_set_macro_label's shape.
-// Handles \" and \\ escapes only (all our own JSON builder ever emits, and
-// all the label text field can realistically contain) -- not a general
-// JSON string decoder.
+// Parses a `[<int>,"<string>"]` request (native_set_macro_label's shape).
+// Only handles \" and \\ escapes -- not a general JSON string decoder.
 static bool parse_int_and_string_arg(const char *req, long *out_int, char *out_str,
                                      size_t out_str_size)
 {
@@ -278,11 +265,53 @@ static void native_toggle_slot_mute(const char *id, const char *req, void *arg)
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
+// arg: 0/1. Swaps mixer_state's backend between the real platform one and
+// audio_simulated's fake sessions -- "detaching" from OS audio.
+static void native_set_simulation_enabled(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long args[1];
+    bool ok = parse_int_args(req, args, 1) == 1;
+    if (ok) {
+        bool enabled = args[0] != 0;
+        mixer_state_set_backend(bridge->mixer,
+                                enabled ? audio_simulated_get_vtable() : audio_backend_get_vtable());
+        bridge->simulation_enabled = enabled;
+
+        if (enabled) {
+            // audio_simulated announces its sessions on the first poll()
+            // after set_callbacks(), which mixer_state_set_backend() just
+            // wired up -- force that poll synchronously here instead of
+            // waiting for the background thread's next ~16ms tick, so the
+            // simulated sessions exist immediately, then wire each one
+            // straight to its matching knob. Otherwise simulation would
+            // start with every slot unassigned and the device would show no
+            // VU activity until the user separately assigned each session,
+            // same as they would for a real app -- defeats the point of a
+            // one-click "just show me something" toggle.
+            mixer_state_poll(bridge->mixer);
+            for (int i = 0; i < MIXER_CHANNELS; i++) {
+                mixer_state_assign_slot(bridge->mixer, i, audio_simulated_session_id(i));
+            }
+        }
+    }
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// args: [channelIndex, levelPercent]. Only takes effect while simulation is
+// enabled (audio_simulated_set_level() no-ops otherwise).
+static void native_set_simulated_level(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long args[2];
+    bool ok = parse_int_args(req, args, 2) == 2 &&
+             audio_simulated_set_level((int)args[0], (uint8_t)args[1]);
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
 // args: [trigger, type, targetSlot, modifiers_1, key_1, modifiers_2, key_2, ...].
-// targetSlot only matters for MACRO_ACTION_TOGGLE_MUTE_SLOT; the
-// (modifiers, key) pairs after it are a MACRO_ACTION_SEND_KEYSTROKE
-// sequence, zero or more of them, flattened -- the JS side sends however
-// many steps the user has built.
+// targetSlot only matters for MACRO_ACTION_TOGGLE_MUTE_SLOT; the (modifiers,
+// key) pairs are a flattened MACRO_ACTION_SEND_KEYSTROKE sequence.
 static void native_set_macro(const char *id, const char *req, void *arg)
 {
     ui_bridge_t *bridge = arg;
@@ -328,28 +357,23 @@ static void native_set_macro_label(const char *id, const char *req, void *arg)
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
-static void native_set_show_graph(const char *id, const char *req, void *arg)
+// args: GUI_COMPONENT_COUNT ids, draw order top-to-bottom; GUI_COMPONENT_NONE
+// disables that slot. device_settings_set_gui_layout normalizes, so an
+// out-of-range or duplicate id here just gets dropped rather than rejecting
+// the whole call.
+static void native_set_gui_layout(const char *id, const char *req, void *arg)
 {
     ui_bridge_t *bridge = arg;
-    long args[1];
-    bool ok = parse_int_args(req, args, 1) == 1;
+    long args[GUI_COMPONENT_COUNT];
+    bool ok = parse_int_args(req, args, GUI_COMPONENT_COUNT) == GUI_COMPONENT_COUNT;
     if (ok) {
-        device_settings_set_show_graph(bridge->settings, args[0] != 0);
+        uint8_t layout[GUI_COMPONENT_COUNT];
+        for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
+            layout[i] = (uint8_t)args[i];
+        }
+        device_settings_set_gui_layout(bridge->settings, layout);
     }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
-}
-
-// Temporary: DevTools are unavailable in this environment (policy-disabled,
-// no Inspect/F12), so window.onState's own try/catch (see
-// ui_bridge_push_state) reports failures here instead, visible the same
-// way everything else has been -- stderr. req is the raw JSON args array
-// webview_bind hands us, e.g. ["TypeError: ..."] -- not worth a real
-// parser for a one-off diagnostic.
-static void native_js_error(const char *id, const char *req, void *arg)
-{
-    ui_bridge_t *bridge = arg;
-    fprintf(stderr, "js_error: %s\n", req);
-    webview_return(bridge->w, id, 0, "true");
 }
 
 // --- window bootstrap ----------------------------------------------------
@@ -386,9 +410,8 @@ static bool get_executable_dir(char *out, size_t out_size)
     return true;
 }
 
-// Percent-encodes spaces only -- the one character overwhelmingly likely to
-// show up in real install paths ("Program Files", "My Drive", ...) that
-// would otherwise break the file:// URI.
+// Percent-encodes spaces only -- the one character likely to show up in
+// real install paths that would otherwise break the file:// URI.
 static void append_url_escaped(strbuf_t *sb, const char *s)
 {
     for (const char *p = s; *p; p++) {
@@ -433,11 +456,7 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     bridge->macros = macros;
     bridge->settings = settings;
 
-    // Temporary: debug=1 to allow opening DevTools (right-click -> Inspect,
-    // or F12) while diagnosing why the UI doesn't reflect pushed session
-    // state despite the JSON reaching webview_eval() correctly. Revert to
-    // 0 once done.
-    bridge->w = webview_create(1, NULL);
+    bridge->w = webview_create(0, NULL);
     if (!bridge->w) {
         free(bridge);
         return NULL;
@@ -452,8 +471,9 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     webview_bind(bridge->w, "native_toggle_slot_mute", native_toggle_slot_mute, bridge);
     webview_bind(bridge->w, "native_set_macro", native_set_macro, bridge);
     webview_bind(bridge->w, "native_set_macro_label", native_set_macro_label, bridge);
-    webview_bind(bridge->w, "native_set_show_graph", native_set_show_graph, bridge);
-    webview_bind(bridge->w, "native_js_error", native_js_error, bridge);
+    webview_bind(bridge->w, "native_set_gui_layout", native_set_gui_layout, bridge);
+    webview_bind(bridge->w, "native_set_simulation_enabled", native_set_simulation_enabled, bridge);
+    webview_bind(bridge->w, "native_set_simulated_level", native_set_simulated_level, bridge);
 
     char url[1024];
     if (!resolve_ui_index_url(url, sizeof(url))) {

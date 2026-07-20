@@ -45,6 +45,7 @@ static void sync_slots_locked(mixer_state_t *state, const audio_session_t *sessi
         }
         slot->volume = (uint8_t)lroundf(session->volume * 100.0f);
         slot->peak = (uint8_t)lroundf(session->peak * 100.0f);
+        slot->muted = session->muted;
         copy_slot_name(slot->name, session->name);
     }
 }
@@ -129,9 +130,44 @@ void mixer_state_destroy(mixer_state_t *state)
 
 void mixer_state_poll(mixer_state_t *state)
 {
-    if (state->backend) {
-        state->vtable->poll(state->backend);
+    // Snapshot under the lock: mixer_state_set_backend() can swap these
+    // pointers from another thread between mixer_state_poll() calls.
+    mutex_lock(&state->lock);
+    const audio_backend_vtable_t *vtable = state->vtable;
+    audio_backend_t *backend = state->backend;
+    mutex_unlock(&state->lock);
+
+    if (backend) {
+        vtable->poll(backend);
     }
+}
+
+void mixer_state_set_backend(mixer_state_t *state, const audio_backend_vtable_t *backend_vtable)
+{
+    mutex_lock(&state->lock);
+    audio_backend_t *old_backend = state->backend;
+    const audio_backend_vtable_t *old_vtable = state->vtable;
+    // NULL out first so a concurrent mixer_state_poll()/set_slot_volume_locked()
+    // sees "no backend" instead of a pointer we're about to destroy.
+    state->backend = NULL;
+    state->session_count = 0;
+    memset(state->slots, 0, sizeof(state->slots));
+    mutex_unlock(&state->lock);
+
+    if (old_backend) {
+        old_vtable->destroy(old_backend);
+    }
+
+    audio_backend_t *new_backend = backend_vtable->create();
+    if (new_backend) {
+        backend_vtable->set_callbacks(new_backend, on_session_added, on_session_updated,
+                                      on_session_removed, state);
+    }
+
+    mutex_lock(&state->lock);
+    state->vtable = backend_vtable;
+    state->backend = new_backend;
+    mutex_unlock(&state->lock);
 }
 
 size_t mixer_state_list_sessions(mixer_state_t *state, audio_session_t *out, size_t max_out)
@@ -160,6 +196,7 @@ bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id
     state->slots[slot].session_id = session_id;
     state->slots[slot].volume = (uint8_t)lroundf(state->sessions[idx].volume * 100.0f);
     state->slots[slot].peak = (uint8_t)lroundf(state->sessions[idx].peak * 100.0f);
+    state->slots[slot].muted = state->sessions[idx].muted;
     copy_slot_name(state->slots[slot].name, state->sessions[idx].name);
 
     mutex_unlock(&state->lock);
@@ -196,8 +233,10 @@ static bool set_slot_volume_locked(mixer_state_t *state, int slot, uint8_t volum
     }
 
     uint32_t session_id = s->session_id;
+    const audio_backend_vtable_t *vtable = state->vtable;
+    audio_backend_t *backend = state->backend;
     mutex_unlock(&state->lock);
-    bool ok = state->vtable->set_volume(state->backend, session_id, volume_percent / 100.0f);
+    bool ok = backend && vtable->set_volume(backend, session_id, volume_percent / 100.0f);
     mutex_lock(&state->lock);
 
     if (ok) {
@@ -262,9 +301,11 @@ bool mixer_state_toggle_slot_mute(mixer_state_t *state, int slot)
     uint32_t session_id = s->session_id;
     int idx = find_session_index_locked(state, session_id);
     bool new_muted = idx >= 0 ? !state->sessions[idx].muted : true;
+    const audio_backend_vtable_t *vtable = state->vtable;
+    audio_backend_t *backend = state->backend;
 
     mutex_unlock(&state->lock);
-    bool ok = state->vtable->set_muted(state->backend, session_id, new_muted);
+    bool ok = backend && vtable->set_muted(backend, session_id, new_muted);
     mutex_lock(&state->lock);
 
     if (ok) {
@@ -288,6 +329,7 @@ void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out)
         channels[i].volume = s->assigned ? s->volume : 0;
         channels[i].left = s->assigned ? s->peak : 0;
         channels[i].right = s->assigned ? s->peak : 0;
+        channels[i].muted = s->assigned && s->muted;
         any_assigned |= s->assigned ? 1 : 0;
     }
     mutex_unlock(&state->lock);

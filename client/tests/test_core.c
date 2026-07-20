@@ -8,8 +8,10 @@
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
 #include "platform/audio_backend.h"
+#include "platform/audio_simulated.h"
 #include "protocol.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,9 +46,9 @@ static void test_protocol_levels_roundtrip(void)
     protocol_build_levels_packet(&built, channels, 1);
 
     levels_packet parsed;
-    CHECK(protocol_parse_levels_packet((const uint8_t *)&built, sizeof(built), &parsed));
-    CHECK(parsed.header == PROTOCOL_START_BYTE);
-    CHECK(parsed.type == PROTOCOL_PACKET_LEVELS);
+    CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_LEVELS, (const uint8_t *)&built, sizeof(built), &parsed));
+    CHECK(parsed.hdr.header == PROTOCOL_START_BYTE);
+    CHECK(parsed.hdr.type == PROTOCOL_PACKET_LEVELS);
     CHECK(parsed.valid == 1);
     CHECK(memcmp(parsed.channels, channels, sizeof(channels)) == 0);
 }
@@ -58,7 +60,7 @@ static void test_protocol_metadata_roundtrip(void)
     protocol_build_metadata_packet(&built, names);
 
     metadata_packet parsed;
-    CHECK(protocol_parse_metadata_packet((const uint8_t *)&built, sizeof(built), &parsed));
+    CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_METADATA, (const uint8_t *)&built, sizeof(built), &parsed));
     CHECK(strcmp(parsed.names[0], "Discord") == 0);
     CHECK(strcmp(parsed.names[3], "Browser") == 0);
 }
@@ -68,38 +70,45 @@ static void test_protocol_device_config_roundtrip(void)
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN] = {0};
     strcpy(labels[0], "MUTE");
     strcpy(labels[7], "PLAY");
+    uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
+                                               GUI_COMPONENT_MACRO_GRID};
 
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, 1);
+    protocol_build_device_config_packet(&built, labels, gui_layout);
 
     device_config_packet parsed;
-    CHECK(protocol_parse_device_config_packet((const uint8_t *)&built, sizeof(built), &parsed));
+    CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_DEVICE_CONFIG, (const uint8_t *)&built, sizeof(built),
+                         &parsed));
     CHECK(strcmp(parsed.macro_labels[0], "MUTE") == 0);
     CHECK(strcmp(parsed.macro_labels[7], "PLAY") == 0);
     CHECK(parsed.macro_labels[1][0] == '\0');
-    CHECK(parsed.show_graph == 1);
+    CHECK(memcmp(parsed.gui_layout, gui_layout, sizeof(gui_layout)) == 0);
 }
 
 static void test_protocol_checksum_rejects_corruption(void)
 {
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN] = {0};
+    uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
+                                               GUI_COMPONENT_MACRO_GRID};
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, 1);
+    protocol_build_device_config_packet(&built, labels, gui_layout);
 
     uint8_t raw[sizeof(built)];
     memcpy(raw, &built, sizeof(raw));
     raw[3] ^= 0xFF; // flip a byte inside the body
 
     device_config_packet parsed;
-    CHECK(!protocol_parse_device_config_packet(raw, sizeof(raw), &parsed));
+    CHECK(!PROTOCOL_PARSE(PROTOCOL_PACKET_DEVICE_CONFIG, raw, sizeof(raw), &parsed));
 }
 
 static void test_protocol_reader_feed_roundtrip(void)
 {
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN] = {0};
     strcpy(labels[2], "SW3");
+    uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE,
+                                               GUI_COMPONENT_NONE};
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, 0);
+    protocol_build_device_config_packet(&built, labels, gui_layout);
 
     protocol_reader_t reader;
     protocol_reader_init(&reader);
@@ -121,7 +130,7 @@ static void test_protocol_reader_feed_roundtrip(void)
     CHECK(out_size == sizeof(built));
 
     device_config_packet parsed;
-    CHECK(protocol_parse_device_config_packet(reader.buffer, out_size, &parsed));
+    CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_DEVICE_CONFIG, reader.buffer, out_size, &parsed));
     CHECK(strcmp(parsed.macro_labels[2], "SW3") == 0);
 }
 
@@ -154,6 +163,23 @@ static void test_protocol_reader_resyncs_after_bad_checksum(void)
     }
     CHECK(result == PROTOCOL_FEED_COMPLETE);
     CHECK(out_type == PROTOCOL_PACKET_COMMAND_EVENT);
+}
+
+static void test_protocol_normalize_gui_layout_clears_bad_entries(void)
+{
+    uint8_t layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_MACRO_GRID,
+                                           0x7F};
+    protocol_normalize_gui_layout(layout);
+    CHECK(layout[0] == GUI_COMPONENT_MACRO_GRID); // first occurrence kept
+    CHECK(layout[1] == GUI_COMPONENT_NONE);       // duplicate cleared
+    CHECK(layout[2] == GUI_COMPONENT_NONE);       // out-of-range cleared
+
+    uint8_t untouched[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_NONE, GUI_COMPONENT_WAVEFORM,
+                                              GUI_COMPONENT_VU_METERS};
+    protocol_normalize_gui_layout(untouched);
+    CHECK(untouched[0] == GUI_COMPONENT_NONE);
+    CHECK(untouched[1] == GUI_COMPONENT_WAVEFORM);
+    CHECK(untouched[2] == GUI_COMPONENT_VU_METERS);
 }
 
 // --- macro_map.c -------------------------------------------------------------
@@ -229,7 +255,12 @@ static void test_macro_trigger_from_command(void)
 static void test_device_settings_defaults(void)
 {
     device_settings_t *settings = device_settings_create();
-    CHECK(device_settings_get_show_graph(settings));
+
+    uint8_t gui_layout[GUI_COMPONENT_COUNT];
+    device_settings_get_gui_layout(settings, gui_layout);
+    uint8_t expected[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
+                                             GUI_COMPONENT_MACRO_GRID};
+    CHECK(memcmp(gui_layout, expected, sizeof(expected)) == 0);
 
     char label[MACRO_LABEL_LEN];
     device_settings_get_macro_label(settings, 0, label, sizeof(label));
@@ -274,15 +305,18 @@ static void test_device_settings_build_packet(void)
 {
     device_settings_t *settings = device_settings_create();
     device_settings_set_macro_label(settings, 0, "MUTE");
-    device_settings_set_show_graph(settings, false);
+    uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_VU_METERS,
+                                               GUI_COMPONENT_NONE};
+    device_settings_set_gui_layout(settings, gui_layout);
 
     device_config_packet built;
     device_settings_build_packet(settings, &built);
 
     device_config_packet parsed;
-    CHECK(protocol_parse_device_config_packet((const uint8_t *)&built, sizeof(built), &parsed));
+    CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_DEVICE_CONFIG, (const uint8_t *)&built, sizeof(built),
+                         &parsed));
     CHECK(strcmp(parsed.macro_labels[0], "MUTE") == 0);
-    CHECK(parsed.show_graph == 0);
+    CHECK(memcmp(parsed.gui_layout, gui_layout, sizeof(gui_layout)) == 0);
 
     device_settings_destroy(settings);
 }
@@ -508,6 +542,166 @@ static void test_mixer_state_build_packets_reflect_assignment(void)
     mixer_state_destroy(state);
 }
 
+// g_fake is a single global reused across mixer_state_create()/
+// mixer_state_set_backend() calls -- fake_create() memsets it fresh each
+// time it's invoked, mirroring how a real second backend instance would
+// start with no sessions of its own.
+static void test_mixer_state_set_backend_clears_sessions_and_slots(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    audio_session_t s1 = make_session(1, "Discord", 0.5f, false);
+    g_fake.on_added(&s1, g_fake.user_data);
+    CHECK(mixer_state_assign_slot(state, 0, 1));
+
+    mixer_state_set_backend(state, &g_fake_vtable);
+
+    audio_session_t out[8];
+    CHECK(mixer_state_list_sessions(state, out, 8) == 0);
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(state, 0, &slot));
+    CHECK(!slot.assigned);
+
+    // The new backend's callbacks are still wired up -- a session it
+    // reports should flow through normally.
+    audio_session_t s2 = make_session(2, "Spotify", 0.7f, false);
+    g_fake.on_added(&s2, g_fake.user_data);
+    CHECK(mixer_state_list_sessions(state, out, 8) == 1);
+
+    mixer_state_destroy(state);
+}
+
+// --- audio_simulated.c -------------------------------------------------------
+
+typedef struct {
+    bool have[MIXER_CHANNELS];
+    float peak[MIXER_CHANNELS];
+} sim_capture_t;
+
+static void sim_capture_cb(const audio_session_t *session, void *user_data)
+{
+    sim_capture_t *cap = user_data;
+    uint32_t base = 0xF0000000u;
+    if (session->id < base) {
+        return;
+    }
+    uint32_t idx = session->id - base;
+    if (idx >= MIXER_CHANNELS) {
+        return;
+    }
+    cap->have[idx] = true;
+    cap->peak[idx] = session->peak;
+}
+
+// Drives audio_simulated's fake peak generator through many poll() ticks and
+// checks the "realistic, glitch-free" properties it's meant to have: every
+// reported peak stays within [0, ceiling], no tick-to-tick value ever jumps
+// by more than the easing filter's max possible step (i.e. always smooth,
+// never a discontinuous spike/clip), it's not just stuck at zero, and two
+// channels given the same ceiling still diverge (independent per-channel
+// randomness, not four identical/lockstep meters).
+static void test_audio_simulated_peaks_are_smooth_and_bounded(void)
+{
+    const audio_backend_vtable_t *vt = audio_simulated_get_vtable();
+    audio_backend_t *backend = vt->create();
+    CHECK(backend != NULL);
+
+    sim_capture_t cap = {0};
+    vt->set_callbacks(backend, sim_capture_cb, sim_capture_cb, NULL, &cap);
+
+    vt->poll(backend); // first poll: announces all channels, still silent
+    for (int i = 0; i < MIXER_CHANNELS; i++) {
+        CHECK(cap.have[i]);
+        CHECK(cap.peak[i] == 0.0f);
+    }
+
+    const float ceiling = 0.80f;
+    CHECK(audio_simulated_set_level(0, (uint8_t)(ceiling * 100)));
+    CHECK(audio_simulated_set_level(1, (uint8_t)(ceiling * 100)));
+
+    float prev0 = 0.0f, prev1 = 0.0f;
+    bool saw_activity = false;
+    bool diverged = false;
+    for (int tick = 0; tick < 300; tick++) {
+        vt->poll(backend);
+
+        CHECK(cap.peak[0] >= 0.0f && cap.peak[0] <= ceiling + 1e-3f);
+        CHECK(cap.peak[1] >= 0.0f && cap.peak[1] <= ceiling + 1e-3f);
+        CHECK(fabsf(cap.peak[0] - prev0) <= 0.16f);
+        CHECK(fabsf(cap.peak[1] - prev1) <= 0.16f);
+
+        if (cap.peak[0] > 0.05f) {
+            saw_activity = true;
+        }
+        if (fabsf(cap.peak[0] - cap.peak[1]) > 0.02f) {
+            diverged = true;
+        }
+        prev0 = cap.peak[0];
+        prev1 = cap.peak[1];
+    }
+    CHECK(saw_activity);
+    CHECK(diverged);
+
+    // Muting eases the peak down to silence rather than snapping.
+    CHECK(vt->set_muted(backend, 0xF0000000u, true));
+    float prev = prev0;
+    bool ever_jumped = false;
+    for (int tick = 0; tick < 60; tick++) {
+        vt->poll(backend);
+        if (fabsf(cap.peak[0] - prev) > 0.16f) {
+            ever_jumped = true;
+        }
+        prev = cap.peak[0];
+    }
+    CHECK(!ever_jumped);
+    CHECK(cap.peak[0] < 0.05f); // settled near silent after enough ticks
+
+    vt->destroy(backend);
+}
+
+// Reproduces exactly what ui_bridge.c's native_set_simulation_enabled does
+// after swapping in the simulated backend: force one synchronous poll (so
+// the sessions exist immediately rather than waiting for a background
+// thread's next tick) and assign each simulated channel straight to its
+// matching slot. Guards the fix for "enabling simulation shows 0 on every
+// VU meter because nothing is assigned yet".
+static void test_mixer_state_with_simulated_backend_auto_assigns(void)
+{
+    mixer_state_t *state = mixer_state_create(audio_simulated_get_vtable());
+
+    mixer_state_poll(state);
+    for (int i = 0; i < MIXER_CHANNELS; i++) {
+        CHECK(mixer_state_assign_slot(state, i, audio_simulated_session_id(i)));
+    }
+
+    for (int i = 0; i < MIXER_CHANNELS; i++) {
+        mixer_slot_t slot;
+        CHECK(mixer_state_get_slot(state, i, &slot));
+        CHECK(slot.assigned);
+        CHECK(slot.session_id == audio_simulated_session_id(i));
+    }
+
+    // Default level is non-zero (audio_simulated.c's sim_create()), so
+    // after enough polls at least one slot should show real peak activity
+    // reaching the wire packet -- not stuck at 0.
+    bool saw_nonzero_peak = false;
+    for (int tick = 0; tick < 120; tick++) {
+        mixer_state_poll(state);
+        levels_packet levels;
+        mixer_state_build_levels_packet(state, &levels);
+        CHECK(levels.valid == 1);
+        for (int i = 0; i < MIXER_CHANNELS; i++) {
+            if (levels.channels[i].left > 0) {
+                saw_nonzero_peak = true;
+            }
+        }
+    }
+    CHECK(saw_nonzero_peak);
+
+    mixer_state_destroy(state);
+}
+
 int main(void)
 {
     RUN_TEST(test_protocol_levels_roundtrip);
@@ -516,6 +710,7 @@ int main(void)
     RUN_TEST(test_protocol_checksum_rejects_corruption);
     RUN_TEST(test_protocol_reader_feed_roundtrip);
     RUN_TEST(test_protocol_reader_resyncs_after_bad_checksum);
+    RUN_TEST(test_protocol_normalize_gui_layout_clears_bad_entries);
 
     RUN_TEST(test_macro_map_defaults);
     RUN_TEST(test_macro_map_set_get_roundtrip);
@@ -534,6 +729,10 @@ int main(void)
     RUN_TEST(test_mixer_state_adjust_volume_clamps);
     RUN_TEST(test_mixer_state_toggle_mute);
     RUN_TEST(test_mixer_state_build_packets_reflect_assignment);
+    RUN_TEST(test_mixer_state_set_backend_clears_sessions_and_slots);
+
+    RUN_TEST(test_audio_simulated_peaks_are_smooth_and_bounded);
+    RUN_TEST(test_mixer_state_with_simulated_backend_auto_assigns);
 
     if (g_failures == 0) {
         printf("\nAll tests passed.\n");

@@ -180,7 +180,7 @@ static bool pump_incoming(device_link_t *link)
             }
 
             command_event_packet packet;
-            if (!protocol_parse_command_event_packet(link->reader.buffer, size, &packet)) {
+            if (!PROTOCOL_PARSE(type, link->reader.buffer, size, &packet)) {
                 continue;
             }
 

@@ -8,40 +8,36 @@
 static const char *TAG = "INPUT";
 
 // --- ESP32-S3-WROOM-1 pin assignments -------------------------------------
-// Key matrix: 2 rows x 4 columns = 8 switches. The current PCB also wires a
-// 5th column (COL_5 = GPIO13) but the next revision drops it, so it's left
-// unused here.
+// Key matrix: 2 rows x 4 columns = 8 switches.
 static constexpr gpio_num_t ROW_PINS[InputManager::MATRIX_ROWS] = {GPIO_NUM_1, GPIO_NUM_2};
 static constexpr gpio_num_t COL_PINS[InputManager::MATRIX_COLS] = {GPIO_NUM_7, GPIO_NUM_8,
                                                                     GPIO_NUM_9, GPIO_NUM_10};
 
-// Rotary encoders: CLK, DT, BTN per encoder. The current PCB also wires a
-// 5th encoder (CLK=GPIO18, DT=GPIO41, BTN=GPIO48) but the next revision
-// drops it, so it's left unused here.
+// Rotary encoders: CLK, DT, BTN per encoder.
 static constexpr gpio_num_t ENCODER_CLK_PINS[InputManager::ENCODER_COUNT] = {
-    GPIO_NUM_14, GPIO_NUM_15, GPIO_NUM_16, GPIO_NUM_17};
+    GPIO_NUM_14, GPIO_NUM_17, GPIO_NUM_38, GPIO_NUM_41};
 static constexpr gpio_num_t ENCODER_DT_PINS[InputManager::ENCODER_COUNT] = {
-    GPIO_NUM_21, GPIO_NUM_38, GPIO_NUM_39, GPIO_NUM_40};
+    GPIO_NUM_15, GPIO_NUM_18, GPIO_NUM_39, GPIO_NUM_42};
 static constexpr gpio_num_t ENCODER_BTN_PINS[InputManager::ENCODER_COUNT] = {
-    GPIO_NUM_42, GPIO_NUM_45, GPIO_NUM_46, GPIO_NUM_47};
+    GPIO_NUM_16, GPIO_NUM_21, GPIO_NUM_40, GPIO_NUM_47};
 
 // --- Wire commands per physical input --------------------------------------
-static constexpr Command SWITCH_COMMANDS[InputManager::MATRIX_KEYS] = {
-    Command::SWITCH_1, Command::SWITCH_2, Command::SWITCH_3, Command::SWITCH_4,
-    Command::SWITCH_5, Command::SWITCH_6, Command::SWITCH_7, Command::SWITCH_8,
+static constexpr uint8_t SWITCH_COMMANDS[InputManager::MATRIX_KEYS] = {
+    PROTOCOL_CMD_SWITCH_1, PROTOCOL_CMD_SWITCH_2, PROTOCOL_CMD_SWITCH_3, PROTOCOL_CMD_SWITCH_4,
+    PROTOCOL_CMD_SWITCH_5, PROTOCOL_CMD_SWITCH_6, PROTOCOL_CMD_SWITCH_7, PROTOCOL_CMD_SWITCH_8,
 };
 
-static constexpr Command ENCODER_PLUS_COMMANDS[InputManager::ENCODER_COUNT] = {
-    Command::ENCODER_1_PLUS, Command::ENCODER_2_PLUS, Command::ENCODER_3_PLUS,
-    Command::ENCODER_4_PLUS,
+static constexpr uint8_t ENCODER_PLUS_COMMANDS[InputManager::ENCODER_COUNT] = {
+    PROTOCOL_CMD_ENCODER_1_PLUS, PROTOCOL_CMD_ENCODER_2_PLUS, PROTOCOL_CMD_ENCODER_3_PLUS,
+    PROTOCOL_CMD_ENCODER_4_PLUS,
 };
-static constexpr Command ENCODER_MINUS_COMMANDS[InputManager::ENCODER_COUNT] = {
-    Command::ENCODER_1_MINUS, Command::ENCODER_2_MINUS, Command::ENCODER_3_MINUS,
-    Command::ENCODER_4_MINUS,
+static constexpr uint8_t ENCODER_MINUS_COMMANDS[InputManager::ENCODER_COUNT] = {
+    PROTOCOL_CMD_ENCODER_1_MINUS, PROTOCOL_CMD_ENCODER_2_MINUS, PROTOCOL_CMD_ENCODER_3_MINUS,
+    PROTOCOL_CMD_ENCODER_4_MINUS,
 };
-static constexpr Command ENCODER_BTN_COMMANDS[InputManager::ENCODER_COUNT] = {
-    Command::ENCODER_1_BTN, Command::ENCODER_2_BTN, Command::ENCODER_3_BTN,
-    Command::ENCODER_4_BTN,
+static constexpr uint8_t ENCODER_BTN_COMMANDS[InputManager::ENCODER_COUNT] = {
+    PROTOCOL_CMD_ENCODER_1_BTN, PROTOCOL_CMD_ENCODER_2_BTN, PROTOCOL_CMD_ENCODER_3_BTN,
+    PROTOCOL_CMD_ENCODER_4_BTN,
 };
 
 // Standard 2-bit Gray code quadrature table, indexed by (prev_state << 2 |
@@ -54,12 +50,12 @@ static constexpr int8_t QUADRATURE_TABLE[16] = {
     0, 1,  -1, 0,
 };
 
-static void configure_input_pin(gpio_num_t pin)
+static void configure_input_pin(gpio_num_t pin, bool pull_up)
 {
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = 1ULL << pin;
     cfg.mode = GPIO_MODE_INPUT;
-    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_up_en = pull_up ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
     cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
     cfg.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&cfg);
@@ -79,13 +75,15 @@ void InputManager::configure_gpio()
     }
 
     for (gpio_num_t pin : COL_PINS) {
-        configure_input_pin(pin);
+        configure_input_pin(pin, /*pull_up=*/true);
     }
 
+    // Encoder lines have explicit 10k pull-ups on the board, so the
+    // internal pull-up is left disabled here.
     for (int e = 0; e < ENCODER_COUNT; e++) {
-        configure_input_pin(ENCODER_CLK_PINS[e]);
-        configure_input_pin(ENCODER_DT_PINS[e]);
-        configure_input_pin(ENCODER_BTN_PINS[e]);
+        configure_input_pin(ENCODER_CLK_PINS[e], /*pull_up=*/false);
+        configure_input_pin(ENCODER_DT_PINS[e], /*pull_up=*/false);
+        configure_input_pin(ENCODER_BTN_PINS[e], /*pull_up=*/false);
     }
 }
 
@@ -157,7 +155,7 @@ void InputManager::input_task(void *pvParameters)
 }
 
 void InputManager::process_edge(bool raw_pressed, uint8_t &debounce_count, bool &pressed,
-                                Command command)
+                                uint8_t command)
 {
     if (raw_pressed == pressed) {
         debounce_count = 0;
@@ -229,10 +227,10 @@ void InputManager::scan_encoders()
     }
 }
 
-void InputManager::send_command(Command command)
+void InputManager::send_command(uint8_t command)
 {
     command_event_packet packet;
-    Protocol::build_command_event_packet(command, &packet);
+    protocol_build_command_event_packet(command, &packet);
 
     tud_cdc_n_write(0, &packet, sizeof(packet));
     tud_cdc_n_write_flush(0);
