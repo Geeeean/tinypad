@@ -36,6 +36,13 @@ typedef enum {
     MACRO_KEY_UP, MACRO_KEY_DOWN, MACRO_KEY_LEFT, MACRO_KEY_RIGHT,
     MACRO_KEY_F1, MACRO_KEY_F2, MACRO_KEY_F3, MACRO_KEY_F4, MACRO_KEY_F5, MACRO_KEY_F6,
     MACRO_KEY_F7, MACRO_KEY_F8, MACRO_KEY_F9, MACRO_KEY_F10, MACRO_KEY_F11, MACRO_KEY_F12,
+    // Common punctuation, appended after the function keys rather than
+    // interleaved so existing indices (used directly as macro_key_t values
+    // and mirrored 1:1 into client/ui/src/types.ts's MACRO_KEY_LABELS) stay
+    // stable.
+    MACRO_KEY_PERIOD, MACRO_KEY_COMMA, MACRO_KEY_SLASH, MACRO_KEY_SEMICOLON,
+    MACRO_KEY_QUOTE, MACRO_KEY_MINUS, MACRO_KEY_EQUAL, MACRO_KEY_LBRACKET,
+    MACRO_KEY_RBRACKET, MACRO_KEY_BACKSLASH, MACRO_KEY_GRAVE,
     MACRO_KEY_COUNT,
 } macro_key_t;
 

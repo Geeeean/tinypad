@@ -1,5 +1,5 @@
 // Lets a macro be typed instead of built one step/click at a time, e.g.
-// "g e a n cmd+tab" -> five steps (g, e, a, n, then Cmd+Tab together).
+// "cmd+c cmd+v cmd+/" -> three steps (Cmd+C, then Cmd+V, then Cmd+/).
 // Grammar: whitespace-separated steps; each step is modifier names joined
 // by "+", ending in exactly one key name (case-insensitive). A step with no
 // "+" is just a bare key.
@@ -43,6 +43,10 @@ const KEY_ALIASES: Record<string, number> = (() => {
   map.left = 45;
   map.right = 46;
   for (let i = 1; i <= 12; i++) map[`f${i}`] = 46 + i; // f1..f12 -> 47..58
+  // Punctuation, appended after f1..f12 in types.ts's MACRO_KEY_LABELS --
+  // the symbol itself is the token, e.g. "." or "cmd+/".
+  const punctuation = [".", ",", "/", ";", "'", "-", "=", "[", "]", "\\", "`"];
+  punctuation.forEach((sym, i) => (map[sym] = 59 + i)); // -> 59..69
   return map;
 })();
 

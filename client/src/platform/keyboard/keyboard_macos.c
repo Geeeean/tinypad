@@ -47,6 +47,19 @@ static CGKeyCode keycode_for(macro_key_t key)
     case MACRO_KEY_F7: return 0x62; case MACRO_KEY_F8: return 0x64;
     case MACRO_KEY_F9: return 0x65; case MACRO_KEY_F10: return 0x6D;
     case MACRO_KEY_F11: return 0x67; case MACRO_KEY_F12: return 0x6F;
+    // ANSI (US) layout keycodes, same layout-independent-by-position caveat
+    // as A-Z/0-9 above.
+    case MACRO_KEY_PERIOD: return 0x2F;
+    case MACRO_KEY_COMMA: return 0x2B;
+    case MACRO_KEY_SLASH: return 0x2C;
+    case MACRO_KEY_SEMICOLON: return 0x29;
+    case MACRO_KEY_QUOTE: return 0x27;
+    case MACRO_KEY_MINUS: return 0x1B;
+    case MACRO_KEY_EQUAL: return 0x18;
+    case MACRO_KEY_LBRACKET: return 0x21;
+    case MACRO_KEY_RBRACKET: return 0x1E;
+    case MACRO_KEY_BACKSLASH: return 0x2A;
+    case MACRO_KEY_GRAVE: return 0x32;
     default: return 0xFFFF;
     }
 }

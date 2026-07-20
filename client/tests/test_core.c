@@ -7,6 +7,7 @@
 #include "core/device_settings.h"
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
+#include "core/profile_store.h"
 #include "platform/audio_backend.h"
 #include "platform/audio_simulated.h"
 #include "protocol.h"
@@ -572,6 +573,67 @@ static void test_mixer_state_set_backend_clears_sessions_and_slots(void)
     mixer_state_destroy(state);
 }
 
+static void test_mixer_state_pending_assignment_immediate(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    audio_session_t s1 = make_session(1, "Discord", 0.5f, false);
+    g_fake.on_added(&s1, g_fake.user_data);
+
+    mixer_state_set_pending_assignment(state, 0, "Discord");
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(state, 0, &slot));
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == 1);
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_pending_assignment_on_later_add(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    mixer_state_set_pending_assignment(state, 1, "Spotify");
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(state, 1, &slot));
+    CHECK(!slot.assigned); // not running yet
+
+    audio_session_t s = make_session(7, "Spotify", 0.3f, false);
+    g_fake.on_added(&s, g_fake.user_data);
+
+    CHECK(mixer_state_get_slot(state, 1, &slot));
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == 7);
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_pending_assignment_cancelled_by_manual_assign(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    mixer_state_set_pending_assignment(state, 2, "Chrome");
+
+    // User manually assigns a different session to the same slot before
+    // "Chrome" ever shows up.
+    audio_session_t other = make_session(9, "Firefox", 0.4f, false);
+    g_fake.on_added(&other, g_fake.user_data);
+    CHECK(mixer_state_assign_slot(state, 2, 9));
+
+    // Now "Chrome" appears -- it must NOT steal the slot back.
+    audio_session_t chrome = make_session(10, "Chrome", 0.6f, false);
+    g_fake.on_added(&chrome, g_fake.user_data);
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(state, 2, &slot));
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == 9); // still Firefox, not hijacked by the late Chrome match
+
+    mixer_state_destroy(state);
+}
+
 // --- audio_simulated.c -------------------------------------------------------
 
 typedef struct {
@@ -702,6 +764,253 @@ static void test_mixer_state_with_simulated_backend_auto_assigns(void)
     mixer_state_destroy(state);
 }
 
+// --- profile_store.c ---------------------------------------------------------
+// ":memory:" -- no file I/O, matches this suite's no-external-resources style.
+
+static void test_profile_store_seeds_default_on_first_open(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    CHECK(store != NULL);
+
+    profile_summary_t profiles[8];
+    size_t n = profile_store_list(store, profiles, 8);
+    CHECK(n == 1);
+    CHECK(strcmp(profiles[0].name, "Default") == 0);
+
+    int64_t active;
+    CHECK(profile_store_get_active_id(store, &active));
+    CHECK(active == profiles[0].id);
+
+    profile_store_close(store);
+}
+
+static void test_profile_store_save_as_and_load_round_trip(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+
+    device_settings_set_macro_label(settings, 3, "MUTE ALL");
+    uint8_t layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE,
+                                           GUI_COMPONENT_NONE};
+    device_settings_set_gui_layout(settings, layout);
+    macro_action_t action = {.type = MACRO_ACTION_TOGGLE_MUTE_SLOT, .target_slot = 2};
+    macro_map_set(macros, MACRO_TRIGGER_SWITCH_5, action);
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "Streaming", macros, settings, NULL, &new_id));
+
+    profile_summary_t profiles[8];
+    CHECK(profile_store_list(store, profiles, 8) == 2);
+
+    int64_t active;
+    CHECK(profile_store_get_active_id(store, &active));
+    CHECK(active == new_id); // save_as makes the new profile active
+
+    macro_map_t *macros2 = macro_map_create();
+    device_settings_t *settings2 = device_settings_create();
+    CHECK(profile_store_load(store, new_id, macros2, settings2, NULL));
+
+    char label[MACRO_LABEL_LEN];
+    device_settings_get_macro_label(settings2, 3, label, sizeof(label));
+    CHECK(strcmp(label, "MUTE ALL") == 0);
+
+    uint8_t got_layout[GUI_COMPONENT_COUNT];
+    device_settings_get_gui_layout(settings2, got_layout);
+    CHECK(got_layout[0] == GUI_COMPONENT_MACRO_GRID);
+    CHECK(got_layout[1] == GUI_COMPONENT_NONE);
+
+    macro_action_t got = macro_map_get(macros2, MACRO_TRIGGER_SWITCH_5);
+    CHECK(got.type == MACRO_ACTION_TOGGLE_MUTE_SLOT);
+    CHECK(got.target_slot == 2);
+
+    macro_map_destroy(macros);
+    macro_map_destroy(macros2);
+    device_settings_destroy(settings);
+    device_settings_destroy(settings2);
+    profile_store_close(store);
+}
+
+static void test_profile_store_round_trips_keystroke_steps(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+
+    macro_action_t action = {.type = MACRO_ACTION_SEND_KEYSTROKE, .target_slot = -1};
+    action.steps[0] = (macro_keystroke_step_t){.modifiers = MACRO_MOD_META, .key = MACRO_KEY_C};
+    action.steps[1] = (macro_keystroke_step_t){.modifiers = 0, .key = MACRO_KEY_V};
+    action.step_count = 2;
+    macro_map_set(macros, MACRO_TRIGGER_SWITCH_1, action);
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "Keystrokes", macros, settings, NULL, &new_id));
+
+    macro_map_t *macros2 = macro_map_create();
+    device_settings_t *settings2 = device_settings_create();
+    CHECK(profile_store_load(store, new_id, macros2, settings2, NULL));
+
+    macro_action_t got = macro_map_get(macros2, MACRO_TRIGGER_SWITCH_1);
+    CHECK(got.type == MACRO_ACTION_SEND_KEYSTROKE);
+    CHECK(got.step_count == 2);
+    CHECK(got.steps[0].modifiers == MACRO_MOD_META);
+    CHECK(got.steps[0].key == MACRO_KEY_C);
+    CHECK(got.steps[1].modifiers == 0);
+    CHECK(got.steps[1].key == MACRO_KEY_V);
+
+    macro_map_destroy(macros);
+    macro_map_destroy(macros2);
+    device_settings_destroy(settings);
+    device_settings_destroy(settings2);
+    profile_store_close(store);
+}
+
+static void test_profile_store_save_overwrites_active_profile(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+
+    int64_t active;
+    CHECK(profile_store_get_active_id(store, &active)); // "Default"
+
+    device_settings_set_macro_label(settings, 0, "HELLO");
+    CHECK(profile_store_save(store, active, macros, settings, NULL));
+
+    macro_map_t *macros2 = macro_map_create();
+    device_settings_t *settings2 = device_settings_create();
+    CHECK(profile_store_load(store, active, macros2, settings2, NULL));
+
+    char label[MACRO_LABEL_LEN];
+    device_settings_get_macro_label(settings2, 0, label, sizeof(label));
+    CHECK(strcmp(label, "HELLO") == 0);
+
+    // Still just one profile -- save() overwrote in place, didn't create a
+    // new row.
+    profile_summary_t profiles[8];
+    CHECK(profile_store_list(store, profiles, 8) == 1);
+
+    macro_map_destroy(macros);
+    macro_map_destroy(macros2);
+    device_settings_destroy(settings);
+    device_settings_destroy(settings2);
+    profile_store_close(store);
+}
+
+static void test_profile_store_rename(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    profile_summary_t profiles[8];
+    profile_store_list(store, profiles, 8);
+
+    CHECK(profile_store_rename(store, profiles[0].id, "My Setup"));
+    profile_store_list(store, profiles, 8);
+    CHECK(strcmp(profiles[0].name, "My Setup") == 0);
+
+    CHECK(!profile_store_rename(store, 99999, "Ghost")); // nonexistent profile
+
+    profile_store_close(store);
+}
+
+static void test_profile_store_delete_refuses_last_and_cascades(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+
+    macro_action_t action = {.type = MACRO_ACTION_SEND_KEYSTROKE, .target_slot = -1};
+    action.steps[0] = (macro_keystroke_step_t){.modifiers = 0, .key = MACRO_KEY_A};
+    action.step_count = 1;
+    macro_map_set(macros, MACRO_TRIGGER_SWITCH_1, action);
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "Temp", macros, settings, NULL, &new_id));
+
+    profile_summary_t profiles[8];
+    CHECK(profile_store_list(store, profiles, 8) == 2);
+
+    // Two profiles exist -- deleting one (with keystroke-step child rows,
+    // exercising the ON DELETE CASCADE chain) should succeed.
+    CHECK(profile_store_delete(store, new_id));
+    CHECK(profile_store_list(store, profiles, 8) == 1);
+
+    // Only one left now -- refuse to delete the last remaining profile.
+    CHECK(!profile_store_delete(store, profiles[0].id));
+    CHECK(profile_store_list(store, profiles, 8) == 1);
+
+    macro_map_destroy(macros);
+    device_settings_destroy(settings);
+    profile_store_close(store);
+}
+
+static void test_profile_store_delete_active_falls_back(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+
+    profile_summary_t profiles[8];
+    profile_store_list(store, profiles, 8);
+    int64_t default_id = profiles[0].id;
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "Temp", macros, settings, NULL, &new_id)); // becomes active
+
+    int64_t active;
+    CHECK(profile_store_get_active_id(store, &active));
+    CHECK(active == new_id);
+
+    CHECK(profile_store_delete(store, new_id));
+
+    CHECK(profile_store_get_active_id(store, &active));
+    CHECK(active == default_id); // fell back to the remaining profile
+
+    macro_map_destroy(macros);
+    device_settings_destroy(settings);
+    profile_store_close(store);
+}
+
+static void test_profile_store_persists_and_reconnects_slot_assignment(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+    mixer_state_t *mixer = mixer_state_create(&g_fake_vtable);
+
+    audio_session_t s = make_session(5, "Discord", 0.5f, false);
+    g_fake.on_added(&s, g_fake.user_data);
+    CHECK(mixer_state_assign_slot(mixer, 1, 5));
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "WithSlots", macros, settings, mixer, &new_id));
+
+    // Fresh mixer_state, no sessions known yet -- load should leave the
+    // slot unassigned until "Discord" actually appears.
+    macro_map_t *macros2 = macro_map_create();
+    device_settings_t *settings2 = device_settings_create();
+    mixer_state_t *mixer2 = mixer_state_create(&g_fake_vtable); // rewires g_fake to mixer2
+    CHECK(profile_store_load(store, new_id, macros2, settings2, mixer2));
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(mixer2, 1, &slot));
+    CHECK(!slot.assigned);
+
+    audio_session_t s2 = make_session(11, "Discord", 0.2f, false);
+    g_fake.on_added(&s2, g_fake.user_data); // fires against mixer2
+
+    CHECK(mixer_state_get_slot(mixer2, 1, &slot));
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == 11);
+
+    mixer_state_destroy(mixer);
+    mixer_state_destroy(mixer2);
+    macro_map_destroy(macros);
+    macro_map_destroy(macros2);
+    device_settings_destroy(settings);
+    device_settings_destroy(settings2);
+    profile_store_close(store);
+}
+
 int main(void)
 {
     RUN_TEST(test_protocol_levels_roundtrip);
@@ -730,9 +1039,21 @@ int main(void)
     RUN_TEST(test_mixer_state_toggle_mute);
     RUN_TEST(test_mixer_state_build_packets_reflect_assignment);
     RUN_TEST(test_mixer_state_set_backend_clears_sessions_and_slots);
+    RUN_TEST(test_mixer_state_pending_assignment_immediate);
+    RUN_TEST(test_mixer_state_pending_assignment_on_later_add);
+    RUN_TEST(test_mixer_state_pending_assignment_cancelled_by_manual_assign);
 
     RUN_TEST(test_audio_simulated_peaks_are_smooth_and_bounded);
     RUN_TEST(test_mixer_state_with_simulated_backend_auto_assigns);
+
+    RUN_TEST(test_profile_store_seeds_default_on_first_open);
+    RUN_TEST(test_profile_store_save_as_and_load_round_trip);
+    RUN_TEST(test_profile_store_round_trips_keystroke_steps);
+    RUN_TEST(test_profile_store_save_overwrites_active_profile);
+    RUN_TEST(test_profile_store_rename);
+    RUN_TEST(test_profile_store_delete_refuses_last_and_cascades);
+    RUN_TEST(test_profile_store_delete_active_falls_back);
+    RUN_TEST(test_profile_store_persists_and_reconnects_slot_assignment);
 
     if (g_failures == 0) {
         printf("\nAll tests passed.\n");

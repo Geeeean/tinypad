@@ -54,6 +54,13 @@ describe("parseKeystrokeToken", () => {
     expect(parseKeystrokeToken("nonsense")).toBeNull();
   });
 
+  it("accepts punctuation keys, bare and with modifiers", () => {
+    expect(parseKeystrokeToken(".")).toEqual({ modifiers: 0, key: 59 });
+    expect(parseKeystrokeToken("/")).toEqual({ modifiers: 0, key: 61 });
+    expect(parseKeystrokeToken("`")).toEqual({ modifiers: 0, key: 69 });
+    expect(parseKeystrokeToken("cmd+/")).toEqual({ modifiers: MacroModifier.Meta, key: 61 });
+  });
+
   it("rejects an unrecognized modifier", () => {
     expect(parseKeystrokeToken("foo+v")).toBeNull();
   });
@@ -111,5 +118,12 @@ describe("stringifyKeystrokeSequence", () => {
 
   it("produces an empty string for an empty step list", () => {
     expect(stringifyKeystrokeSequence([])).toBe("");
+  });
+
+  it("round-trips a punctuation-heavy sequence", () => {
+    const original = "g . / cmd+/ ; -";
+    const { steps } = parseKeystrokeSequence(original);
+    const text = stringifyKeystrokeSequence(steps);
+    expect(parseKeystrokeSequence(text).steps).toEqual(steps);
   });
 });

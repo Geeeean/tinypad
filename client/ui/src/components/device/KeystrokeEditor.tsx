@@ -8,7 +8,7 @@ interface KeystrokeEditorProps {
   onCommit: (steps: KeystrokeStep[]) => void;
 }
 
-// Type the whole sequence as text (e.g. "g e a n cmd+tab") instead of
+// Type the whole sequence as text (e.g. "cmd+c cmd+v cmd+/") instead of
 // building it step-by-step with buttons. Parsed live for preview/error
 // feedback; committed to the macro on blur or Enter, and only when it
 // parses cleanly (a mid-typing invalid string never overwrites the last
@@ -35,7 +35,7 @@ export function KeystrokeEditor({ steps, onCommit }: KeystrokeEditorProps) {
     <div className="flex min-w-[220px] flex-col gap-1.5">
       <Input
         value={text}
-        placeholder="g e a n cmd+tab"
+        placeholder="cmd+c cmd+v cmd+/"
         className="h-8 font-mono text-xs"
         onFocus={() => setFocused(true)}
         onChange={(e) => setText(e.target.value)}
@@ -65,7 +65,7 @@ export function KeystrokeEditor({ steps, onCommit }: KeystrokeEditorProps) {
         </div>
       ) : (
         <p className="text-[11px] text-muted-foreground">
-          Space-separated steps, e.g. "g e a n cmd+tab".
+          Space-separated steps, e.g. "cmd+c cmd+v cmd+/".
         </p>
       )}
     </div>

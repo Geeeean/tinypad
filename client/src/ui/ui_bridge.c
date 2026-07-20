@@ -26,7 +26,13 @@ struct ui_bridge {
     mixer_state_t *mixer;
     macro_map_t *macros;
     device_settings_t *settings;
+    profile_store_t *profiles;
     bool simulation_enabled;
+    // Whether macros/settings/slot assignments have changed since the
+    // active profile was last saved/loaded -- explicit save, not auto-save,
+    // so the UI needs this to show an "unsaved changes" indicator and
+    // confirm before discarding on profile switch.
+    bool profile_dirty;
 };
 
 // --- tiny string-builder + JSON helpers ---------------------------------
@@ -142,7 +148,25 @@ static void build_state_json(ui_bridge_t *bridge, strbuf_t *sb)
         device_settings_get_macro_label(bridge->settings, i, label, sizeof(label));
         sb_append_json_string(sb, label);
     }
-    sb_appendf(sb, "]},\"simulationEnabled\":%s}", bridge->simulation_enabled ? "true" : "false");
+    sb_appendf(sb, "]},\"simulationEnabled\":%s", bridge->simulation_enabled ? "true" : "false");
+
+    sb_appendf(sb, ",\"profiles\":[");
+    {
+        profile_summary_t profiles[64];
+        size_t n_profiles = bridge->profiles ? profile_store_list(bridge->profiles, profiles, 64) : 0;
+        for (size_t i = 0; i < n_profiles; i++) {
+            if (i) sb_appendf(sb, ",");
+            sb_appendf(sb, "{\"id\":%lld,\"name\":", (long long)profiles[i].id);
+            sb_append_json_string(sb, profiles[i].name);
+            sb_appendf(sb, "}");
+        }
+    }
+    int64_t active_profile_id = -1;
+    if (bridge->profiles) {
+        profile_store_get_active_id(bridge->profiles, &active_profile_id);
+    }
+    sb_appendf(sb, "],\"activeProfileId\":%lld,\"profileDirty\":%s}", (long long)active_profile_id,
+              bridge->profile_dirty ? "true" : "false");
 }
 
 // push_state runs on the background polling thread, but webview_eval() must
@@ -236,6 +260,9 @@ static void native_assign_slot(const char *id, const char *req, void *arg)
     long args[2];
     bool ok = parse_int_args(req, args, 2) == 2 &&
              mixer_state_assign_slot(bridge->mixer, (int)args[0], (uint32_t)args[1]);
+    if (ok) {
+        bridge->profile_dirty = true;
+    }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
@@ -244,6 +271,9 @@ static void native_clear_slot(const char *id, const char *req, void *arg)
     ui_bridge_t *bridge = arg;
     long args[1];
     bool ok = parse_int_args(req, args, 1) == 1 && mixer_state_clear_slot(bridge->mixer, (int)args[0]);
+    if (ok) {
+        bridge->profile_dirty = true;
+    }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
@@ -338,6 +368,7 @@ static void native_set_macro(const char *id, const char *req, void *arg)
         macro_map_set(bridge->macros, (macro_trigger_t)args[0], action);
         fprintf(stderr, "ui: macro assigned: trigger=%ld type=%ld targetSlot=%ld steps=%d\n",
                 args[0], args[1], args[2], step_pairs);
+        bridge->profile_dirty = true;
         ok = true;
     }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
@@ -353,6 +384,7 @@ static void native_set_macro_label(const char *id, const char *req, void *arg)
     if (ok) {
         device_settings_set_macro_label(bridge->settings, (int)index, label);
         fprintf(stderr, "ui: macro label set: index=%ld label=\"%s\"\n", index, label);
+        bridge->profile_dirty = true;
     }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
@@ -372,6 +404,102 @@ static void native_set_gui_layout(const char *id, const char *req, void *arg)
             layout[i] = (uint8_t)args[i];
         }
         device_settings_set_gui_layout(bridge->settings, layout);
+        bridge->profile_dirty = true;
+    }
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// --- profile management --------------------------------------------------
+
+// Parses a `["<string>"]` request (a single string argument, no leading
+// int) -- native_save_profile_as's shape. Only handles \" and \\ escapes,
+// same as parse_int_and_string_arg above.
+static bool parse_string_arg(const char *req, char *out_str, size_t out_str_size)
+{
+    const char *p = req;
+    while (*p && *p != '[') p++;
+    if (*p != '[') return false;
+    p++;
+
+    while (*p == ' ') p++;
+    if (*p != '"') return false;
+    p++;
+
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < out_str_size) {
+        if (*p == '\\' && *(p + 1)) {
+            p++;
+        }
+        out_str[i++] = *p++;
+    }
+    out_str[i] = '\0';
+    return true;
+}
+
+// Overwrites the currently active profile with the current live state.
+static void native_save_profile(const char *id, const char *req, void *arg)
+{
+    (void)req;
+    ui_bridge_t *bridge = arg;
+    int64_t active_id;
+    bool ok = bridge->profiles && profile_store_get_active_id(bridge->profiles, &active_id) &&
+             profile_store_save(bridge->profiles, active_id, bridge->macros, bridge->settings,
+                                bridge->mixer);
+    if (ok) {
+        bridge->profile_dirty = false;
+    }
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// arg: [name]. Creates a new profile from the current live state and makes
+// it active.
+static void native_save_profile_as(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    char name[64];
+    bool ok = bridge->profiles && parse_string_arg(req, name, sizeof(name)) && name[0] &&
+             profile_store_save_as(bridge->profiles, name, bridge->macros, bridge->settings,
+                                   bridge->mixer, NULL);
+    if (ok) {
+        bridge->profile_dirty = false;
+    }
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// arg: [profileId, name].
+static void native_rename_profile(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long profile_id;
+    char name[64];
+    bool ok = bridge->profiles && parse_int_and_string_arg(req, &profile_id, name, sizeof(name)) &&
+             name[0] && profile_store_rename(bridge->profiles, profile_id, name);
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// arg: [profileId]. Refuses to delete the last remaining profile (see
+// profile_store_delete()).
+static void native_delete_profile(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long args[1];
+    bool ok = bridge->profiles && parse_int_args(req, args, 1) == 1 &&
+             profile_store_delete(bridge->profiles, args[0]);
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
+// arg: [profileId]. Loads a profile into the live state, discarding any
+// unsaved edits to whatever was active -- the UI is expected to confirm
+// with the user first if profileDirty is set, this just does the swap.
+static void native_switch_profile(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long args[1];
+    bool ok = bridge->profiles && parse_int_args(req, args, 1) == 1 &&
+             profile_store_load(bridge->profiles, args[0], bridge->macros, bridge->settings,
+                                bridge->mixer);
+    if (ok) {
+        bridge->profile_dirty = false;
     }
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
@@ -446,7 +574,7 @@ static bool resolve_ui_index_url(char *out, size_t out_size)
 }
 
 ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
-                              device_settings_t *settings)
+                              device_settings_t *settings, profile_store_t *profiles)
 {
     ui_bridge_t *bridge = calloc(1, sizeof(ui_bridge_t));
     if (!bridge) {
@@ -455,6 +583,7 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     bridge->mixer = mixer;
     bridge->macros = macros;
     bridge->settings = settings;
+    bridge->profiles = profiles;
 
     bridge->w = webview_create(0, NULL);
     if (!bridge->w) {
@@ -474,6 +603,11 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     webview_bind(bridge->w, "native_set_gui_layout", native_set_gui_layout, bridge);
     webview_bind(bridge->w, "native_set_simulation_enabled", native_set_simulation_enabled, bridge);
     webview_bind(bridge->w, "native_set_simulated_level", native_set_simulated_level, bridge);
+    webview_bind(bridge->w, "native_save_profile", native_save_profile, bridge);
+    webview_bind(bridge->w, "native_save_profile_as", native_save_profile_as, bridge);
+    webview_bind(bridge->w, "native_rename_profile", native_rename_profile, bridge);
+    webview_bind(bridge->w, "native_delete_profile", native_delete_profile, bridge);
+    webview_bind(bridge->w, "native_switch_profile", native_switch_profile, bridge);
 
     char url[1024];
     if (!resolve_ui_index_url(url, sizeof(url))) {

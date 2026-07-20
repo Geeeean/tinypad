@@ -25,7 +25,7 @@ typedef enum {
 
 // Bounded so macro_action_t stays a plain fixed-size value (easy to copy,
 // no allocation) -- generous for a macro-pad binding.
-#define MACRO_KEYSTROKE_MAX_STEPS 16
+#define MACRO_KEYSTROKE_MAX_STEPS 64
 
 typedef struct {
     uint32_t modifiers; // bitmask of macro_modifier_t

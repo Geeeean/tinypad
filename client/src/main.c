@@ -2,6 +2,7 @@
 #include "core/device_settings.h"
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
+#include "core/profile_store.h"
 #include "platform/audio_backend.h"
 #include "platform/com_init.h"
 #include "platform/serial_port.h"
@@ -53,6 +54,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Overlays the active profile's saved macros/settings/slot assignments
+    // onto the in-code defaults just set above. Graceful degradation if this
+    // fails for any reason (no write access, corrupt db, etc): the app keeps
+    // running on those defaults, same as a missing serial device below.
+    char db_path[1024];
+    profile_store_t *profiles =
+        profile_store_default_path(db_path, sizeof(db_path)) ? profile_store_open(db_path) : NULL;
+    if (!profiles) {
+        fprintf(stderr, "tinypad: could not open profile database (continuing without persistence)\n");
+    } else {
+        int64_t active_profile_id;
+        if (profile_store_get_active_id(profiles, &active_profile_id)) {
+            profile_store_load(profiles, active_profile_id, macros, settings, mixer);
+        }
+    }
+
     app_context_t ctx = {.mixer = mixer, .device_link = NULL, .bridge = NULL};
     atomic_store(&ctx.running, true);
 
@@ -72,7 +89,7 @@ int main(int argc, char **argv)
 
     int exit_code = 1;
 
-    ctx.bridge = ui_bridge_create(mixer, macros, settings);
+    ctx.bridge = ui_bridge_create(mixer, macros, settings, profiles);
     if (!ctx.bridge) {
         fprintf(stderr, "tinypad: failed to create UI window\n");
         goto cleanup;
@@ -99,6 +116,7 @@ cleanup:
     mixer_state_destroy(mixer);
     macro_map_destroy(macros);
     device_settings_destroy(settings);
+    profile_store_close(profiles);
     platform_com_uninit();
 
     return exit_code;

@@ -37,6 +37,9 @@ export const MACRO_KEY_LABELS: readonly string[] = [
   ...Array.from({ length: 10 }, (_, i) => String(i)), // 0-9
   "Space", "Enter", "Tab", "Esc", "Backspace", "Delete", "Up", "Down", "Left", "Right",
   ...Array.from({ length: 12 }, (_, i) => `F${i + 1}`), // F1-F12
+  // Appended after F12, matching macro_key_t in keyboard_inject.h -- keeps
+  // every index above stable.
+  ".", ",", "/", ";", "'", "-", "=", "[", "]", "\\", "`",
 ];
 
 export const MACRO_KEY_NONE = 0;
@@ -51,7 +54,7 @@ export const MACRO_TRIGGER_LABELS = [
 export const SLOT_COUNT = 4;
 export const MACRO_TRIGGER_COUNT = MACRO_TRIGGER_LABELS.length;
 // Mirrors MACRO_KEYSTROKE_MAX_STEPS in include/core/macro_map.h.
-export const MACRO_KEYSTROKE_MAX_STEPS = 16;
+export const MACRO_KEYSTROKE_MAX_STEPS = 64;
 // Mirrors MACRO_BUTTON_COUNT in shared/protocol.h -- the 8 switches only,
 // each with an on-device label box (encoder buttons have none).
 export const MACRO_BUTTON_COUNT = 8;
@@ -113,6 +116,11 @@ export interface DeviceSettings {
   macroLabels: string[];
 }
 
+export interface ProfileSummary {
+  id: number;
+  name: string;
+}
+
 export interface TinypadState {
   sessions: AudioSession[];
   slots: MixerSlot[];
@@ -121,6 +129,11 @@ export interface TinypadState {
   // Whether the mixer's audio source is audio_simulated's fake sessions
   // (true) or real OS audio (false).
   simulationEnabled: boolean;
+  profiles: ProfileSummary[];
+  activeProfileId: number;
+  // Whether macros/deviceSettings/slot assignments have changed since the
+  // active profile was last saved -- explicit save, not auto-save.
+  profileDirty: boolean;
 }
 
 function emptyMacroAction(): MacroAction {
@@ -142,4 +155,7 @@ export const EMPTY_STATE: TinypadState = {
     macroLabels: Array(MACRO_BUTTON_COUNT).fill(""),
   },
   simulationEnabled: false,
+  profiles: [],
+  activeProfileId: -1,
+  profileDirty: false,
 };

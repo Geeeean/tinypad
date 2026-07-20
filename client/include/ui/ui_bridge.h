@@ -8,11 +8,12 @@
 #include "core/device_settings.h"
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
+#include "core/profile_store.h"
 
 typedef struct ui_bridge ui_bridge_t;
 
 ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
-                              device_settings_t *settings);
+                              device_settings_t *settings, profile_store_t *profiles);
 void ui_bridge_destroy(ui_bridge_t *bridge);
 
 // Cheap; call from the background polling thread, not the UI thread.

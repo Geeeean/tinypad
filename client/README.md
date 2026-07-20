@@ -104,14 +104,16 @@ Each of the 8 switches and 4 encoder buttons can be bound to an action from
 its dialog's action editor:
 - **Toggle mute** -- mutes/unmutes whichever session is assigned to a channel.
 - **Send keystroke** -- synthesizes a system-wide keystroke *sequence* (up
-  to `MACRO_KEYSTROKE_MAX_STEPS`, currently 16) via
-  `platform/keyboard_inject.h`, e.g. "g" "e" "a" "n" Cmd+Tab as five steps
+  to `MACRO_KEYSTROKE_MAX_STEPS`, currently 64) via
+  `platform/keyboard_inject.h`, e.g. Cmd+C, Cmd+V, Cmd+/ as three steps
   each with their own modifiers. Steps run in order with a short delay
   between them (`MACRO_KEYSTROKE_STEP_DELAY_MS` in `device_link.c`) so the
   target app registers each one distinctly. Type the sequence directly in
-  the action editor's text field, e.g. `g e a n cmd+tab` (space-separated
+  the action editor's text field, e.g. `cmd+c cmd+v cmd+/` (space-separated
   steps, modifiers joined to a key with `+`; see
-  `ui/src/lib/keystrokeParser.ts` for the exact grammar and aliases).
+  `ui/src/lib/keystrokeParser.ts` for the exact grammar and aliases --
+  besides letters/digits/named keys it also supports punctuation: period,
+  comma, slash, semicolon, quote, minus, equal, and both brackets).
   Requires OS permission on macOS (see below) and an X11/XWayland session
   on Linux (see below).
 - **Log (test)** -- always "succeeds" and just logs to stderr; no audio

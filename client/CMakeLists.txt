@@ -43,6 +43,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(webview)
 
+# --- sqlite3 (profile persistence) ------------------------------------------
+# The amalgamation is plain C source with no CMake project of its own
+# (unlike webview above), so FetchContent only populates it -- the tiny
+# static library around it is defined here. Re-verify this URL/hash against
+# https://sqlite.org/download.html when bumping: both change on every
+# SQLite release.
+FetchContent_Declare(
+    sqlite3
+    URL https://sqlite.org/2026/sqlite-amalgamation-3530300.zip
+    URL_HASH SHA3_256=d45c688a8cb23f68611a894a756a12d7eb6ab6e9e2468ca70adbeab3808b5ab9
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(sqlite3)
+
+add_library(sqlite3 STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+target_include_directories(sqlite3 PUBLIC ${sqlite3_SOURCE_DIR})
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(sqlite3 PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
+
 # --- sources ----------------------------------------------------------------
 set(TINYPAD_SOURCES
     src/main.c
@@ -50,6 +71,7 @@ set(TINYPAD_SOURCES
     src/core/macro_map.c
     src/core/device_settings.c
     src/core/device_link.c
+    src/core/profile_store.c
     src/ui/ui_bridge.c
     src/platform/com_init.c
     src/platform/audio/audio_simulated.c
@@ -83,7 +105,7 @@ target_include_directories(tinypad PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
 )
 
-target_link_libraries(tinypad PRIVATE webview::core_static)
+target_link_libraries(tinypad PRIVATE webview::core_static sqlite3)
 
 if(WIN32)
     target_link_libraries(tinypad PRIVATE ole32 oleaut32 user32)
@@ -207,6 +229,7 @@ add_executable(tinypad_tests
     src/core/mixer_state.c
     src/core/macro_map.c
     src/core/device_settings.c
+    src/core/profile_store.c
     src/platform/audio/audio_simulated.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/protocol.c
 )
@@ -214,6 +237,7 @@ target_include_directories(tinypad_tests PRIVATE
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
 )
+target_link_libraries(tinypad_tests PRIVATE sqlite3)
 if(UNIX AND NOT APPLE)
     target_link_libraries(tinypad_tests PRIVATE m) # lroundf (mixer_state.c)
 endif()

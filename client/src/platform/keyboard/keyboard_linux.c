@@ -33,6 +33,17 @@ static KeySym keysym_for(macro_key_t key)
     case MACRO_KEY_F7: return XK_F7; case MACRO_KEY_F8: return XK_F8;
     case MACRO_KEY_F9: return XK_F9; case MACRO_KEY_F10: return XK_F10;
     case MACRO_KEY_F11: return XK_F11; case MACRO_KEY_F12: return XK_F12;
+    case MACRO_KEY_PERIOD: return XK_period;
+    case MACRO_KEY_COMMA: return XK_comma;
+    case MACRO_KEY_SLASH: return XK_slash;
+    case MACRO_KEY_SEMICOLON: return XK_semicolon;
+    case MACRO_KEY_QUOTE: return XK_apostrophe;
+    case MACRO_KEY_MINUS: return XK_minus;
+    case MACRO_KEY_EQUAL: return XK_equal;
+    case MACRO_KEY_LBRACKET: return XK_bracketleft;
+    case MACRO_KEY_RBRACKET: return XK_bracketright;
+    case MACRO_KEY_BACKSLASH: return XK_backslash;
+    case MACRO_KEY_GRAVE: return XK_grave;
     default: return NoSymbol;
     }
 }

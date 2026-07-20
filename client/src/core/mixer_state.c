@@ -13,6 +13,15 @@ struct mixer_state {
     size_t session_count;
 
     mixer_slot_t slots[MIXER_CHANNELS];
+
+    // A slot with has_pending[i] set should auto-assign to the first
+    // session whose name matches pending_names[i] (see
+    // mixer_state_set_pending_assignment()). Same CHANNEL_NAME_LEN
+    // truncation as mixer_slot_t.name -- these names round-tripped through
+    // there already (profile_store persists mixer_slot_t.name, not the
+    // untruncated audio_session_t.name).
+    char pending_names[MIXER_CHANNELS][CHANNEL_NAME_LEN];
+    bool has_pending[MIXER_CHANNELS];
 };
 
 // strncpy doesn't null-terminate when src is >= CHANNEL_NAME_LEN chars;
@@ -50,6 +59,28 @@ static void sync_slots_locked(mixer_state_t *state, const audio_session_t *sessi
     }
 }
 
+// Assigns `slot` to a known session named `name` (a CHANNEL_NAME_LEN-1
+// prefix match, same truncation as mixer_slot_t.name elsewhere). Caller
+// must hold state->lock. Returns true and clears the slot's pending name if
+// a match was found and assigned.
+static bool assign_slot_by_name_locked(mixer_state_t *state, int slot, const char *name)
+{
+    for (size_t i = 0; i < state->session_count; i++) {
+        if (strncmp(state->sessions[i].name, name, CHANNEL_NAME_LEN - 1) != 0) {
+            continue;
+        }
+        state->slots[slot].assigned = true;
+        state->slots[slot].session_id = state->sessions[i].id;
+        state->slots[slot].volume = (uint8_t)lroundf(state->sessions[i].volume * 100.0f);
+        state->slots[slot].peak = (uint8_t)lroundf(state->sessions[i].peak * 100.0f);
+        state->slots[slot].muted = state->sessions[i].muted;
+        copy_slot_name(state->slots[slot].name, state->sessions[i].name);
+        state->has_pending[slot] = false;
+        return true;
+    }
+    return false;
+}
+
 static void on_session_added(const audio_session_t *session, void *user_data)
 {
     mixer_state_t *state = user_data;
@@ -58,6 +89,12 @@ static void on_session_added(const audio_session_t *session, void *user_data)
     if (find_session_index_locked(state, session->id) < 0 &&
         state->session_count < MIXER_MAX_SESSIONS) {
         state->sessions[state->session_count++] = *session;
+    }
+
+    for (int i = 0; i < MIXER_CHANNELS; i++) {
+        if (state->has_pending[i] && !state->slots[i].assigned) {
+            assign_slot_by_name_locked(state, i, state->pending_names[i]);
+        }
     }
 
     mutex_unlock(&state->lock);
@@ -152,6 +189,9 @@ void mixer_state_set_backend(mixer_state_t *state, const audio_backend_vtable_t 
     state->backend = NULL;
     state->session_count = 0;
     memset(state->slots, 0, sizeof(state->slots));
+    memset(state->has_pending, 0, sizeof(state->has_pending)); // a different backend's
+                                                               // sessions shouldn't fulfill
+                                                               // a stale pending name
     mutex_unlock(&state->lock);
 
     if (old_backend) {
@@ -198,6 +238,7 @@ bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id
     state->slots[slot].peak = (uint8_t)lroundf(state->sessions[idx].peak * 100.0f);
     state->slots[slot].muted = state->sessions[idx].muted;
     copy_slot_name(state->slots[slot].name, state->sessions[idx].name);
+    state->has_pending[slot] = false; // manual assignment cancels any pending reconnect-by-name
 
     mutex_unlock(&state->lock);
     return true;
@@ -210,8 +251,24 @@ bool mixer_state_clear_slot(mixer_state_t *state, int slot)
     }
     mutex_lock(&state->lock);
     state->slots[slot] = (mixer_slot_t){0};
+    state->has_pending[slot] = false;
     mutex_unlock(&state->lock);
     return true;
+}
+
+void mixer_state_set_pending_assignment(mixer_state_t *state, int slot, const char *name)
+{
+    if (slot < 0 || slot >= MIXER_CHANNELS) {
+        return;
+    }
+
+    mutex_lock(&state->lock);
+    if (!assign_slot_by_name_locked(state, slot, name)) {
+        memset(state->pending_names[slot], 0, CHANNEL_NAME_LEN);
+        strncpy(state->pending_names[slot], name, CHANNEL_NAME_LEN - 1);
+        state->has_pending[slot] = true;
+    }
+    mutex_unlock(&state->lock);
 }
 
 bool mixer_state_get_slot(mixer_state_t *state, int slot, mixer_slot_t *out)

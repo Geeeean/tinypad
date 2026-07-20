@@ -16,6 +16,11 @@ declare global {
     native_set_gui_layout: (...layout: number[]) => Promise<boolean>;
     native_set_simulation_enabled: (enabled: number) => Promise<boolean>;
     native_set_simulated_level: (index: number, levelPercent: number) => Promise<boolean>;
+    native_save_profile: () => Promise<boolean>;
+    native_save_profile_as: (name: string) => Promise<boolean>;
+    native_rename_profile: (id: number, name: string) => Promise<boolean>;
+    native_delete_profile: (id: number) => Promise<boolean>;
+    native_switch_profile: (id: number) => Promise<boolean>;
     onState?: (state: TinypadState) => void;
   }
 }
@@ -79,6 +84,36 @@ export function setSimulationEnabled(enabled: boolean): void {
 // Only takes effect while simulation is enabled.
 export function setSimulatedLevel(index: number, levelPercent: number): void {
   void window.native_set_simulated_level(index, levelPercent).catch(ignoreRejection);
+}
+
+// Profile actions return their success/failure (unlike the fire-and-forget
+// helpers above) since they have failure modes worth surfacing in the UI --
+// a duplicate name on save-as/rename, or refusing to delete the last
+// remaining profile.
+
+// Overwrites the currently active profile with the current live state.
+export function saveProfile(): Promise<boolean> {
+  return window.native_save_profile().catch(() => false);
+}
+
+// Creates a new profile named `name` from the current live state and makes
+// it active.
+export function saveProfileAs(name: string): Promise<boolean> {
+  return window.native_save_profile_as(name).catch(() => false);
+}
+
+export function renameProfile(id: number, name: string): Promise<boolean> {
+  return window.native_rename_profile(id, name).catch(() => false);
+}
+
+export function deleteProfile(id: number): Promise<boolean> {
+  return window.native_delete_profile(id).catch(() => false);
+}
+
+// Loads `id` into the live state, discarding any unsaved edits to whatever
+// was active -- confirm with the user first if state.profileDirty is set.
+export function switchProfile(id: number): Promise<boolean> {
+  return window.native_switch_profile(id).catch(() => false);
 }
 
 // Registers window.onState (called by ui_bridge_push_state -> webview_eval,

@@ -49,6 +49,14 @@ bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id
 bool mixer_state_clear_slot(mixer_state_t *state, int slot);
 bool mixer_state_get_slot(mixer_state_t *state, int slot, mixer_slot_t *out);
 
+// Assigns `slot` to a session named `name` immediately if one is already
+// known, otherwise remembers the name and assigns automatically the next
+// time a session with that name is added (e.g. the target app hasn't
+// launched yet). mixer_state_assign_slot()/mixer_state_clear_slot() cancel
+// a slot's pending name, so a later matching session doesn't override a
+// manual reassignment. No-op for an out-of-range slot.
+void mixer_state_set_pending_assignment(mixer_state_t *state, int slot, const char *name);
+
 // Encoder turn: nudges the assigned session's volume by `delta_percent`
 // (positive/negative, wire 0-100 scale, clamped). No-op if the slot has no
 // session assigned.
