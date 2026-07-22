@@ -4,10 +4,8 @@
 #include "protocol.h"
 #include <cstdint>
 
-// Reads the 2x4 key matrix and the 4 rotary encoders (CLK/DT/BTN each),
-// debounces/decodes them, and pushes a PROTOCOL_CMD_* over USB CDC on every
-// press/turn. Pin assignments and counts live at the top of the .cpp so a
-// future hardware revision only means editing that table.
+// Reads the 2x4 key matrix and 4 rotary encoders, debounces/decodes them,
+// and pushes a PROTOCOL_CMD_* over USB CDC on every press/turn.
 class InputManager {
   public:
     // Hardware shape, public so the pin/command tables in input_manager.cpp
@@ -31,26 +29,26 @@ class InputManager {
     // real press/release, to reject mechanical switch bounce.
     static constexpr uint8_t DEBOUNCE_SCANS = 3;
 
-    // Held after configure_gpio() and before the first scan, so pull-up/
-    // matrix RC transients from power-on have died down before anything is
-    // trusted (see prime_state()).
+    // Held after configure_gpio() so power-on GPIO transients die down
+    // before anything is trusted (see prime_state()).
     static constexpr int STARTUP_SETTLE_MS = 50;
 
     static void input_task(void *pvParameters);
 
     void configure_gpio();
-    // Reads current GPIO levels straight into the debounce state (matrix,
-    // encoder buttons, encoder quadrature) without ever calling
-    // send_command(). Run once at startup so the first real scan compares
-    // against reality instead of an assumed "everything unpressed" state --
-    // otherwise a stale/bouncing reading during power-on can look like a
-    // real edge and fire a spurious command before things settle.
+    // Seeds the debounce state from the current GPIO reading without ever
+    // calling send_command(), so the first real scan compares against reality.
     void prime_state();
     void scan_matrix();
     void scan_encoders();
 
     static void process_edge(bool raw_pressed, uint8_t &debounce_count, bool &pressed,
                              uint8_t command);
+    // Encoder buttons don't fit the generic press-fires-command shape above:
+    // the command fires on release, and only if the encoder wasn't rotated
+    // while held (a rotate-while-held gesture is a fine-step turn, not a
+    // click -- see scan_encoders()).
+    void process_encoder_btn_edge(int index, bool raw_pressed);
     static void send_command(uint8_t command);
 
     uint8_t _matrix_debounce_count[MATRIX_KEYS] = {0};
@@ -61,4 +59,5 @@ class InputManager {
 
     uint8_t _encoder_btn_debounce_count[ENCODER_COUNT] = {0};
     bool _encoder_btn_pressed[ENCODER_COUNT] = {false};
+    bool _encoder_rotated_while_pressed[ENCODER_COUNT] = {false};
 };

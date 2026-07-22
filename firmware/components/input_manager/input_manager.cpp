@@ -35,14 +35,21 @@ static constexpr uint8_t ENCODER_MINUS_COMMANDS[InputManager::ENCODER_COUNT] = {
     PROTOCOL_CMD_ENCODER_1_MINUS, PROTOCOL_CMD_ENCODER_2_MINUS, PROTOCOL_CMD_ENCODER_3_MINUS,
     PROTOCOL_CMD_ENCODER_4_MINUS,
 };
+static constexpr uint8_t ENCODER_PLUS_FINE_COMMANDS[InputManager::ENCODER_COUNT] = {
+    PROTOCOL_CMD_ENCODER_1_PLUS_FINE, PROTOCOL_CMD_ENCODER_2_PLUS_FINE,
+    PROTOCOL_CMD_ENCODER_3_PLUS_FINE, PROTOCOL_CMD_ENCODER_4_PLUS_FINE,
+};
+static constexpr uint8_t ENCODER_MINUS_FINE_COMMANDS[InputManager::ENCODER_COUNT] = {
+    PROTOCOL_CMD_ENCODER_1_MINUS_FINE, PROTOCOL_CMD_ENCODER_2_MINUS_FINE,
+    PROTOCOL_CMD_ENCODER_3_MINUS_FINE, PROTOCOL_CMD_ENCODER_4_MINUS_FINE,
+};
 static constexpr uint8_t ENCODER_BTN_COMMANDS[InputManager::ENCODER_COUNT] = {
     PROTOCOL_CMD_ENCODER_1_BTN, PROTOCOL_CMD_ENCODER_2_BTN, PROTOCOL_CMD_ENCODER_3_BTN,
     PROTOCOL_CMD_ENCODER_4_BTN,
 };
 
-// Standard 2-bit Gray code quadrature table, indexed by (prev_state << 2 |
-// curr_state). Yields +1/-1 on a valid single-step transition, 0 on no
-// change or an invalid/skipped transition.
+// Standard 2-bit Gray code quadrature table, indexed by (prev_state<<2 |
+// curr_state). Yields +1/-1 on a valid step, 0 on no change or a skip.
 static constexpr int8_t QUADRATURE_TABLE[16] = {
     0, -1, 1,  0, //
     1, 0,  0,  -1, //
@@ -93,9 +100,8 @@ void InputManager::init()
     configure_gpio();
 }
 
-// Mirrors scan_matrix()/scan_encoders()'s readings but writes straight into
-// the debounce state instead of going through process_edge()/send_command()
-// -- this is a baseline snapshot, not an edge detection pass.
+// Mirrors scan_matrix()/scan_encoders() but writes straight into the
+// debounce state -- a baseline snapshot, not an edge-detection pass.
 void InputManager::prime_state()
 {
     for (int r = 0; r < MATRIX_ROWS; r++) {
@@ -140,9 +146,8 @@ void InputManager::input_task(void *pvParameters)
 
     InputManager *instance = static_cast<InputManager *>(pvParameters);
 
-    // Give power-on electrical transients (pull-ups charging, matrix RC
-    // settle) time to die down, then seed the debounce state from the
-    // actual current reading before the first real scan runs.
+    // Let power-on electrical transients die down, then seed the debounce
+    // state from the current reading before the first real scan.
     vTaskDelay(pdMS_TO_TICKS(STARTUP_SETTLE_MS));
     instance->prime_state();
 
@@ -214,16 +219,52 @@ void InputManager::scan_encoders()
 
             if (_encoder_step_accum[e] >= STEPS_PER_DETENT) {
                 _encoder_step_accum[e] = 0;
-                send_command(ENCODER_PLUS_COMMANDS[e]);
+                if (_encoder_btn_pressed[e]) {
+                    _encoder_rotated_while_pressed[e] = true;
+                    send_command(ENCODER_PLUS_FINE_COMMANDS[e]);
+                } else {
+                    send_command(ENCODER_PLUS_COMMANDS[e]);
+                }
             } else if (_encoder_step_accum[e] <= -STEPS_PER_DETENT) {
                 _encoder_step_accum[e] = 0;
-                send_command(ENCODER_MINUS_COMMANDS[e]);
+                if (_encoder_btn_pressed[e]) {
+                    _encoder_rotated_while_pressed[e] = true;
+                    send_command(ENCODER_MINUS_FINE_COMMANDS[e]);
+                } else {
+                    send_command(ENCODER_MINUS_COMMANDS[e]);
+                }
             }
         }
 
         bool raw_pressed = (btn_raw == 0);
-        process_edge(raw_pressed, _encoder_btn_debounce_count[e], _encoder_btn_pressed[e],
-                    ENCODER_BTN_COMMANDS[e]);
+        process_encoder_btn_edge(e, raw_pressed);
+    }
+}
+
+void InputManager::process_encoder_btn_edge(int index, bool raw_pressed)
+{
+    if (raw_pressed == _encoder_btn_pressed[index]) {
+        _encoder_btn_debounce_count[index] = 0;
+        return;
+    }
+
+    _encoder_btn_debounce_count[index]++;
+    if (_encoder_btn_debounce_count[index] < DEBOUNCE_SCANS) {
+        return;
+    }
+
+    _encoder_btn_debounce_count[index] = 0;
+    _encoder_btn_pressed[index] = raw_pressed;
+
+    if (_encoder_btn_pressed[index]) {
+        // Press edge: start tracking whether this turns into a
+        // rotate-while-held gesture instead of a click.
+        _encoder_rotated_while_pressed[index] = false;
+    } else if (!_encoder_rotated_while_pressed[index]) {
+        // Release edge, and the button was never used to modify a turn --
+        // a plain click, so fire it now (not on press, so a click doesn't
+        // preemptively fire before we know whether a turn follows).
+        send_command(ENCODER_BTN_COMMANDS[index]);
     }
 }
 

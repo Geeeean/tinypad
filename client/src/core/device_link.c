@@ -9,6 +9,10 @@
 // Encoder turns adjust volume by this many percentage points per detent.
 #define ENCODER_VOLUME_STEP 5
 
+// Finer step used when the encoder's button is held down while it's turned
+// (PROTOCOL_CMD_ENCODER_*_PLUS_FINE/MINUS_FINE).
+#define ENCODER_VOLUME_STEP_FINE 1
+
 // Delay between steps of a keystroke sequence, so the target app reliably
 // registers each one as a distinct keypress instead of coalescing/dropping
 // events sent back-to-back.
@@ -87,6 +91,14 @@ static const char *command_name(uint8_t command)
     case PROTOCOL_CMD_ENCODER_4_PLUS: return "ENCODER_4_PLUS";
     case PROTOCOL_CMD_ENCODER_4_MINUS: return "ENCODER_4_MINUS";
     case PROTOCOL_CMD_ENCODER_4_BTN: return "ENCODER_4_BTN";
+    case PROTOCOL_CMD_ENCODER_1_PLUS_FINE: return "ENCODER_1_PLUS_FINE";
+    case PROTOCOL_CMD_ENCODER_1_MINUS_FINE: return "ENCODER_1_MINUS_FINE";
+    case PROTOCOL_CMD_ENCODER_2_PLUS_FINE: return "ENCODER_2_PLUS_FINE";
+    case PROTOCOL_CMD_ENCODER_2_MINUS_FINE: return "ENCODER_2_MINUS_FINE";
+    case PROTOCOL_CMD_ENCODER_3_PLUS_FINE: return "ENCODER_3_PLUS_FINE";
+    case PROTOCOL_CMD_ENCODER_3_MINUS_FINE: return "ENCODER_3_MINUS_FINE";
+    case PROTOCOL_CMD_ENCODER_4_PLUS_FINE: return "ENCODER_4_PLUS_FINE";
+    case PROTOCOL_CMD_ENCODER_4_MINUS_FINE: return "ENCODER_4_MINUS_FINE";
     default: return "UNKNOWN";
     }
 }
@@ -104,6 +116,14 @@ static bool encoder_delta_for_command(uint8_t command, int *out_slot, int *out_d
     case PROTOCOL_CMD_ENCODER_3_MINUS: *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP; return true;
     case PROTOCOL_CMD_ENCODER_4_PLUS: *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP; return true;
     case PROTOCOL_CMD_ENCODER_4_MINUS: *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP; return true;
+    case PROTOCOL_CMD_ENCODER_1_PLUS_FINE: *out_slot = 0; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_1_MINUS_FINE: *out_slot = 0; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_2_PLUS_FINE: *out_slot = 1; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_2_MINUS_FINE: *out_slot = 1; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_3_PLUS_FINE: *out_slot = 2; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_3_MINUS_FINE: *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_4_PLUS_FINE: *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_4_MINUS_FINE: *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
     default: return false;
     }
 }

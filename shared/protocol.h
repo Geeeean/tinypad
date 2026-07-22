@@ -52,6 +52,18 @@ enum {
   PROTOCOL_CMD_ENCODER_4_PLUS = 0x19,
   PROTOCOL_CMD_ENCODER_4_MINUS = 0x1A,
   PROTOCOL_CMD_ENCODER_4_BTN = 0x1B,
+
+  // Fired instead of the plain PLUS/MINUS above when the encoder's button is
+  // held down while it's turned -- a fine-grained (1%, vs. the normal 5%)
+  // volume step.
+  PROTOCOL_CMD_ENCODER_1_PLUS_FINE = 0x1C,
+  PROTOCOL_CMD_ENCODER_1_MINUS_FINE = 0x1D,
+  PROTOCOL_CMD_ENCODER_2_PLUS_FINE = 0x1E,
+  PROTOCOL_CMD_ENCODER_2_MINUS_FINE = 0x1F,
+  PROTOCOL_CMD_ENCODER_3_PLUS_FINE = 0x20,
+  PROTOCOL_CMD_ENCODER_3_MINUS_FINE = 0x21,
+  PROTOCOL_CMD_ENCODER_4_PLUS_FINE = 0x22,
+  PROTOCOL_CMD_ENCODER_4_MINUS_FINE = 0x23,
 };
 
 // GUI dashboard pieces the device draws. device_config_packet.gui_layout is
