@@ -21,12 +21,8 @@ class GUI {
         int bottom;
     };
 
-    // One slice per GUI_COMPONENT_* id, indexed by id; only entries named by
-    // an enabled slot in the frame's gui_layout are meaningful. Stacks
-    // enabled components top-to-bottom in gui_layout's order: the two
-    // fixed-height pieces (waveform, macro grid) keep their usual size
-    // wherever they land in the order, and VU meters -- wherever it lands --
-    // takes whatever vertical space is left over.
+    // One slice per GUI_COMPONENT_* id; only entries named by an enabled
+    // gui_layout slot are meaningful. VU meters take whatever space is left.
     struct Layout {
         Bounds bounds[GUI_COMPONENT_COUNT];
     };

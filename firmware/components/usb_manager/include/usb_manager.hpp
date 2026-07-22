@@ -9,6 +9,9 @@ class USBManager {
         levels_packet *shared_levels;
         metadata_packet *shared_metadata;
         device_config_packet *shared_device_config;
+        // esp_timer_get_time() at the most recent valid LEVELS packet;
+        // lets GUI detect a dead host and fall back to the idle screen.
+        int64_t *shared_last_levels_us;
         SemaphoreHandle_t mutex;
     } Config;
 
@@ -22,10 +25,7 @@ class USBManager {
 
     Config _config;
 
-    // Byte-stream framing state, persisted across receive_data() calls so a
-    // packet whose body hasn't fully arrived yet is resumed instead of
-    // re-read; a bad sync byte only drops that one byte, not a whole frame.
-    // Shared with the client's device_link, which runs the same state
-    // machine in the other direction (see shared/protocol.h).
+    // Framing state persisted across receive_data() calls so an in-progress
+    // packet is resumed, not re-read; a bad sync byte drops one byte only.
     protocol_reader_t _reader{};
 };

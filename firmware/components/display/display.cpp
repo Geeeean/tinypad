@@ -1,6 +1,8 @@
 #include "display.hpp"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "display_component";
 
@@ -12,15 +14,25 @@ static const char *TAG = "display_component";
 #define PIN_NUM_LCD_RST 5
 #define PIN_NUM_LCD_DC 6
 
-// Gate of the low-side N-FET switching the backlight. Boots as a floating
-// input on the ESP32-S3, so it must be driven explicitly or the backlight
-// is off/flickery.
+// Gate of the low-side N-FET switching the backlight. Boots floating on the
+// ESP32-S3, so it must be driven explicitly or the backlight is off/flickery.
 #define PIN_NUM_BACKLIGHT 13
+
+// Tearing-effect output from the panel (physical pin 25 on the module).
+#define PIN_NUM_TE 48
 
 #define PANEL_NATIVE_WIDTH 240
 #define PANEL_NATIVE_HEIGHT 320
 
 static lgfx::LGFX_Device tft;
+static SemaphoreHandle_t te_semaphore = nullptr;
+
+static void IRAM_ATTR te_isr_handler(void *arg)
+{
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(te_semaphore, &woken);
+    portYIELD_FROM_ISR(woken);
+}
 
 void Display::init()
 {
@@ -38,6 +50,20 @@ void Display::init()
     bl_cfg.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&bl_cfg);
     gpio_set_level((gpio_num_t)PIN_NUM_BACKLIGHT, 0);
+
+    // TE pulses high at the start of each panel refresh; wait_for_vsync()
+    // uses that edge to time pushes so they land during vblank.
+    gpio_config_t te_cfg = {};
+    te_cfg.pin_bit_mask = 1ULL << PIN_NUM_TE;
+    te_cfg.mode = GPIO_MODE_INPUT;
+    te_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    te_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    te_cfg.intr_type = GPIO_INTR_POSEDGE;
+    gpio_config(&te_cfg);
+
+    te_semaphore = xSemaphoreCreateBinary();
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add((gpio_num_t)PIN_NUM_TE, te_isr_handler, nullptr);
 
     auto bus = new lgfx::Bus_SPI();
     auto bus_cfg = bus->config();
@@ -81,4 +107,10 @@ void Display::init()
 lgfx::LGFX_Device &Display::get_device()
 {
     return tft;
+}
+
+void Display::wait_for_vsync()
+{
+    // 16ms timeout caps the wait at ~60Hz even if TE never fires.
+    xSemaphoreTake(te_semaphore, pdMS_TO_TICKS(16));
 }

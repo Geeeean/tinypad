@@ -1,17 +1,7 @@
 #pragma once
 
 // Wire protocol shared verbatim between the firmware (device) and the client
-// (host). This is the single source of truth for packet layout, so it is a
-// plain C header consumable from both the ESP-IDF C++ build and the client's
-// C build
-//
-// Byte order: little-endian for anything wider than a byte (none of the
-// current packets have multi-byte numeric fields, so this is currently moot,
-// but keep it in mind if one is added).
-//
-// The non-trivial logic (checksum, parsing, building, the byte-stream
-// reader) lives in protocol.c, compiled once and linked by both sides -- this
-// header only declares the wire-format types and the public API.
+// (host); the single source of truth for packet layout. Logic lives in protocol.c.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -65,8 +55,7 @@ enum {
 };
 
 // GUI dashboard pieces the device draws. device_config_packet.gui_layout is
-// an ordered list of these ids (draw order, top-to-bottom); a slot holding
-// GUI_COMPONENT_NONE is disabled.
+// an ordered list of these ids (top-to-bottom); GUI_COMPONENT_NONE disables a slot.
 enum {
   GUI_COMPONENT_VU_METERS = 0,
   GUI_COMPONENT_WAVEFORM = 1,
@@ -85,10 +74,8 @@ enum {
 #pragma pack(push, 1)
 #endif
 
-// Common envelope for every packet: sync byte, type, and checksum together,
-// followed by a type-specific body. Packed + first member of every packet
-// struct below, so this is purely a DRY grouping -- byte offsets 0/1/2 are
-// unchanged from having these as three separate fields.
+// Common envelope for every packet: sync byte, type, and checksum, followed
+// by a type-specific body. Purely a DRY grouping -- byte offsets are unchanged.
 typedef struct PROTOCOL_PACKED {
   uint8_t header;   // PROTOCOL_START_BYTE
   uint8_t type;     // one of PROTOCOL_PACKET_*
@@ -105,7 +92,6 @@ typedef struct PROTOCOL_PACKED {
 typedef struct PROTOCOL_PACKED {
   protocol_header_t hdr; // type = PROTOCOL_PACKET_LEVELS
   channel_level channels[MIXER_CHANNELS];
-  uint8_t valid; // wakes the display when non-zero
 } levels_packet;
 
 typedef struct PROTOCOL_PACKED {
@@ -141,9 +127,7 @@ _Static_assert(sizeof(protocol_header_t) == 3,
 #endif
 
 // Largest packet on the wire; sized for RX buffers that must hold any packet
-// type. All four structs are already defined above, so this is a
-// compile-time constant expression that stays correct if a packet type is
-// added, rather than a pair to keep in sync by hand.
+// type. Computed from the structs above, so it stays correct as they change.
 #define PROTOCOL_MAX2(a, b) ((a) > (b) ? (a) : (b))
 #define PROTOCOL_MAX_PACKET_SIZE                                               \
   PROTOCOL_MAX2(PROTOCOL_MAX2(sizeof(levels_packet), sizeof(metadata_packet)), \
@@ -158,18 +142,15 @@ uint8_t protocol_calculate_checksum(const uint8_t *data, size_t size);
 // for an unrecognized type.
 bool protocol_size_for_type(uint8_t type, size_t *out_size);
 
-// Validates raw_buffer as a packet of expected_type (start byte, type byte,
-// size, checksum) and copies it into out_packet on success. out_size must be
-// sizeof(*out_packet); pass it via the PROTOCOL_PARSE macro below rather than
-// spelling it out at each call site.
+// Validates raw_buffer as a packet of expected_type and copies it into
+// out_packet on success. Pass out_size via the PROTOCOL_PARSE macro below.
 bool protocol_parse_packet(uint8_t expected_type, const uint8_t *raw_buffer,
                            size_t raw_size, void *out_packet, size_t out_size);
 #define PROTOCOL_PARSE(type_const, buf, size, out)                             \
   protocol_parse_packet((type_const), (buf), (size), (out), sizeof(*(out)))
 
 void protocol_build_levels_packet(levels_packet *out_packet,
-                                  const channel_level channels[MIXER_CHANNELS],
-                                  uint8_t valid);
+                                  const channel_level channels[MIXER_CHANNELS]);
 void protocol_build_metadata_packet(
     metadata_packet *out_packet,
     const char names[MIXER_CHANNELS][CHANNEL_NAME_LEN]);
@@ -181,23 +162,12 @@ void protocol_build_device_config_packet(
     const uint8_t gui_layout[GUI_COMPONENT_COUNT]);
 
 // Clears any out-of-range or duplicate id to GUI_COMPONENT_NONE in place.
-// protocol_build_device_config_packet already calls this, so a packet that
-// came off the wire via protocol_parse_packet is the only case that still
-// needs an explicit call before trusting gui_layout.
+// Already applied when building a packet; a raw parsed one still needs it.
 void protocol_normalize_gui_layout(uint8_t gui_layout[GUI_COMPONENT_COUNT]);
 
 // --- Resumable byte-stream framing --------------------------------------
-//
-// Shared by both sides' serial receive loop: feed it one byte at a time as
-// it arrives and it reassembles a full packet across calls, resyncing on
-// the next PROTOCOL_START_BYTE after any framing error. Used by usb_manager
-// (firmware, receiving LEVELS/METADATA) and device_link (client, receiving
-// COMMAND_EVENT).
-//
-// This intentionally reads one byte at a time rather than slurping whatever
-// is available in one call -- at these packet rates the extra call overhead
-// is noise, and it's what lets both sides share this exact state machine
-// instead of each hand-rolling their own.
+// Shared by both sides' serial receive loop: feed it one byte at a time and
+// it reassembles a packet across calls, resyncing after any framing error.
 
 typedef enum {
   PROTOCOL_RX_SYNC = 0,

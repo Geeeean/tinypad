@@ -7,6 +7,7 @@
 static levels_packet shared_levels;
 static metadata_packet shared_metadata;
 static device_config_packet shared_device_config;
+static int64_t shared_last_levels_us = 0;
 static SemaphoreHandle_t shared_mutex = nullptr;
 static USBManager::Config shared_config;
 
@@ -27,6 +28,7 @@ extern "C" void app_main(void)
     shared_config.shared_levels = &shared_levels;
     shared_config.shared_metadata = &shared_metadata;
     shared_config.shared_device_config = &shared_device_config;
+    shared_config.shared_last_levels_us = &shared_last_levels_us;
     shared_config.mutex = shared_mutex;
 
     usb_manager.init(shared_config);

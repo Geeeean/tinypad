@@ -2,9 +2,8 @@
 
 #include <string.h>
 
-// Checksum covers the type-specific body only (everything after the 3-byte
-// header/type/checksum envelope) -- a plain contiguous range, unlike the
-// "everything except the first and last byte" range this replaced.
+// Checksum covers the type-specific body only, i.e. everything after the
+// 3-byte header/type/checksum envelope.
 static bool protocol_validate_checksum(const uint8_t *raw_buffer, size_t size)
 {
     uint8_t packet_checksum = raw_buffer[2];
@@ -64,15 +63,13 @@ bool protocol_parse_packet(uint8_t expected_type, const uint8_t *raw_buffer,
 }
 
 void protocol_build_levels_packet(levels_packet *out_packet,
-                                  const channel_level channels[MIXER_CHANNELS],
-                                  uint8_t valid)
+                                  const channel_level channels[MIXER_CHANNELS])
 {
     out_packet->hdr.header = PROTOCOL_START_BYTE;
     out_packet->hdr.type = PROTOCOL_PACKET_LEVELS;
     for (int i = 0; i < MIXER_CHANNELS; i++) {
         out_packet->channels[i] = channels[i];
     }
-    out_packet->valid = valid;
     protocol_finalize_packet((uint8_t *)out_packet, sizeof(*out_packet));
 }
 

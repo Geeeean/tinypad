@@ -1,5 +1,6 @@
 #include "usb_manager.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "tinyusb.h"
 
 static const char *TAG = "USB";
@@ -64,6 +65,9 @@ void USBManager::usb_task(void *pvParameters)
                 if (incoming_type == PROTOCOL_PACKET_LEVELS &&
                     instance->_config.shared_levels != nullptr) {
                     *instance->_config.shared_levels = incoming_levels;
+                    if (instance->_config.shared_last_levels_us != nullptr) {
+                        *instance->_config.shared_last_levels_us = esp_timer_get_time();
+                    }
                 } else if (incoming_type == PROTOCOL_PACKET_METADATA &&
                           instance->_config.shared_metadata != nullptr) {
                     *instance->_config.shared_metadata = incoming_metadata;
@@ -103,8 +107,7 @@ bool USBManager::receive_data(levels_packet *out_levels, metadata_packet *out_me
         }
 
         // PROTOCOL_FEED_COMPLETE: reader->buffer[0..size) holds a validated
-        // packet. protocol_reader_feed() already reset the framing state for
-        // the next call, but leaves the buffer contents intact for us here.
+        // packet; framing state is already reset for the next call.
         bool ok = false;
 
         if (type == PROTOCOL_PACKET_LEVELS) {
