@@ -5,6 +5,11 @@ cmake_minimum_required(VERSION 3.16)
 # and unreliably from inside the FetchContent'd subdirectory.
 project(tinypad C CXX)
 
+if(APPLE)
+    # For src/platform/tray/tray_macos.m (NSStatusItem-based tray icon).
+    enable_language(OBJC)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -71,6 +76,7 @@ set(TINYPAD_SOURCES
     src/core/macro_map.c
     src/core/device_settings.c
     src/core/device_link.c
+    src/core/device_discovery.c
     src/core/profile_store.c
     src/ui/ui_bridge.c
     src/platform/com_init.c
@@ -81,20 +87,35 @@ set(TINYPAD_SOURCES
 if(WIN32)
     list(APPEND TINYPAD_SOURCES
         src/platform/serial/serial_windows.c
+        src/platform/serial/serial_enum_windows.c
         src/platform/audio/audio_windows_wasapi.c
         src/platform/keyboard/keyboard_windows.c
+        src/platform/tray/tray_windows.c
     )
 elseif(APPLE)
     list(APPEND TINYPAD_SOURCES
         src/platform/serial/serial_posix.c
-        src/platform/audio/audio_macos_stub.c
+        src/platform/serial/serial_enum_macos.c
+        src/platform/audio/audio_macos_coreaudio.m
         src/platform/keyboard/keyboard_macos.c
+        src/platform/tray/tray_macos.m
+    )
+    # webview.h's C++ core is compiled without ARC; these files are
+    # Objective-C and manage their own NSStatusItem/NSMenu/CATapDescription
+    # objects, so opt them into ARC individually rather than manual
+    # retain/release.
+    set_source_files_properties(
+        src/platform/tray/tray_macos.m
+        src/platform/audio/audio_macos_coreaudio.m
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 else()
     list(APPEND TINYPAD_SOURCES
         src/platform/serial/serial_posix.c
+        src/platform/serial/serial_enum_linux.c
         src/platform/audio/audio_linux_pipewire.c
         src/platform/keyboard/keyboard_linux.c
+        src/platform/tray/tray_linux.c
     )
 endif()
 
@@ -108,7 +129,9 @@ target_include_directories(tinypad PRIVATE
 target_link_libraries(tinypad PRIVATE webview::core_static sqlite3)
 
 if(WIN32)
-    target_link_libraries(tinypad PRIVATE ole32 oleaut32 user32)
+    # shell32: Shell_NotifyIcon (tray_windows.c). setupapi: SetupDiGetClassDevs
+    # / SetupDiEnumDeviceInfo (serial_enum_windows.c).
+    target_link_libraries(tinypad PRIVATE ole32 oleaut32 user32 shell32 setupapi)
 
     # webview only ever fetches WebView2's *headers* (MSWebView2::headers,
     # an include-dir-only interface target -- see
@@ -142,10 +165,37 @@ if(WIN32)
         COMMENT "Copying WebView2Loader.dll (${TINYPAD_WEBVIEW2_ARCH}) next to tinypad.exe"
     )
 elseif(APPLE)
-    # Audio is a stub (no extra libs there); webview::core_static already
-    # pulls in WebKit/Cocoa via webview's own CMake. ApplicationServices is
-    # for keyboard_macos.c's CGEventPost-based keystroke injection.
-    target_link_libraries(tinypad PRIVATE "-framework ApplicationServices")
+    # webview::core_static already pulls in WebKit/Cocoa via webview's own
+    # CMake. ApplicationServices is for keyboard_macos.c's CGEventPost-based
+    # keystroke injection. AppKit and IOKit are new: tray_macos.m calls
+    # AppKit symbols directly rather than relying on them arriving
+    # transitively via webview's own Cocoa link, and serial_enum_macos.c
+    # walks the IOKit registry for USB VID/PID. CoreAudio and AudioToolbox
+    # are for audio_macos_coreaudio.m's process-tap mixer backend
+    # (AudioHardwareCreateProcessTap and friends live in CoreAudio;
+    # AudioDeviceCreateIOProcIDWithBlock's dispatch_queue_t param and
+    # CATapDescription's Foundation dependency pull in AudioToolbox/
+    # Foundation transitively, but link them explicitly for clarity).
+    target_link_libraries(tinypad PRIVATE
+        "-framework ApplicationServices"
+        "-framework AppKit"
+        "-framework IOKit"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+    )
+
+    # Embeds Info.plist directly into the executable's __TEXT,__info_plist
+    # section -- the standard way to give a plain (non-.app-bundled) Mach-O
+    # binary an NSAudioCaptureUsageDescription for TCC's "record audio from
+    # other apps" permission prompt, which audio_macos_coreaudio.m's process
+    # taps require on first use. tinypad isn't bundled as a .app: ui_bridge.c's
+    # get_executable_dir() resolves ui/index.html relative to the
+    # executable's own directory, which a bundle (executable moved into
+    # Contents/MacOS/) would break without further changes elsewhere. TCC
+    # reads this section straight from the binary regardless.
+    target_link_options(tinypad PRIVATE
+        "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+    )
 elseif(UNIX)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
@@ -160,6 +210,12 @@ elseif(UNIX)
     endif()
     target_include_directories(tinypad PRIVATE ${X11_INCLUDE_DIR})
     target_link_libraries(tinypad PRIVATE ${X11_LIBRARIES} ${X11_Xtst_LIB})
+
+    # GTK3 for tray_linux.c's GtkStatusIcon -- already a hard dependency via
+    # webview's WebKitGTK backend, so this adds no new runtime dependency,
+    # just an explicit link (webview's own CMake doesn't re-export it to us).
+    pkg_check_modules(TINYPAD_GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
+    target_link_libraries(tinypad PRIVATE PkgConfig::TINYPAD_GTK3)
 endif()
 
 # --- build the React/Tailwind/shadcn frontend (client/ui) and ship it --------
@@ -229,6 +285,7 @@ add_executable(tinypad_tests
     src/core/mixer_state.c
     src/core/macro_map.c
     src/core/device_settings.c
+    src/core/device_discovery.c
     src/core/profile_store.c
     src/platform/audio/audio_simulated.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/protocol.c
