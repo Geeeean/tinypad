@@ -4,6 +4,7 @@
 // each RUN_TEST prints a line and aborts on the first failure so a red run
 // points straight at the offending assertion.
 
+#include "core/device_discovery.h"
 #include "core/device_settings.h"
 #include "core/macro_map.h"
 #include "core/mixer_state.h"
@@ -44,13 +45,12 @@ static void test_protocol_levels_roundtrip(void)
         {.volume = 100, .left = 0, .right = 1},
     };
     levels_packet built;
-    protocol_build_levels_packet(&built, channels, 1);
+    protocol_build_levels_packet(&built, channels);
 
     levels_packet parsed;
     CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_LEVELS, (const uint8_t *)&built, sizeof(built), &parsed));
     CHECK(parsed.hdr.header == PROTOCOL_START_BYTE);
     CHECK(parsed.hdr.type == PROTOCOL_PACKET_LEVELS);
-    CHECK(parsed.valid == 1);
     CHECK(memcmp(parsed.channels, channels, sizeof(channels)) == 0);
 }
 
@@ -181,6 +181,70 @@ static void test_protocol_normalize_gui_layout_clears_bad_entries(void)
     CHECK(untouched[0] == GUI_COMPONENT_NONE);
     CHECK(untouched[1] == GUI_COMPONENT_WAVEFORM);
     CHECK(untouched[2] == GUI_COMPONENT_VU_METERS);
+}
+
+// --- device_discovery.c -------------------------------------------------------
+
+static serial_port_info_t make_port_info(uint16_t vendor_id, uint16_t product_id,
+                                         const char *product)
+{
+    serial_port_info_t info = {0};
+    info.vendor_id = vendor_id;
+    info.product_id = product_id;
+    if (product) {
+        snprintf(info.product, sizeof(info.product), "%s", product);
+    }
+    snprintf(info.path, sizeof(info.path), "/dev/fake");
+    return info;
+}
+
+static void test_device_discovery_matches_by_vendor_and_product_string(void)
+{
+    serial_port_info_t info =
+        make_port_info(TINYPAD_USB_VENDOR_ID, 0x9999, TINYPAD_USB_PRODUCT_STRING);
+    CHECK(device_discovery_matches(&info));
+
+    // Product string wins over a mismatched PID -- it's the more robust
+    // signal (PID shifts if firmware ever enables another USB class).
+    serial_port_info_t wrong_product =
+        make_port_info(TINYPAD_USB_VENDOR_ID, TINYPAD_USB_PRODUCT_ID, "Some Other Device");
+    CHECK(!device_discovery_matches(&wrong_product));
+}
+
+static void test_device_discovery_falls_back_to_pid_without_product_string(void)
+{
+    serial_port_info_t info = make_port_info(TINYPAD_USB_VENDOR_ID, TINYPAD_USB_PRODUCT_ID, NULL);
+    CHECK(device_discovery_matches(&info));
+
+    serial_port_info_t wrong_pid = make_port_info(TINYPAD_USB_VENDOR_ID, 0x9999, NULL);
+    CHECK(!device_discovery_matches(&wrong_pid));
+}
+
+static void test_device_discovery_rejects_wrong_vendor(void)
+{
+    // Even a matching PID/product string must not match under the wrong
+    // VID -- other vendors can and do reuse PIDs.
+    serial_port_info_t info = make_port_info(0x1234, TINYPAD_USB_PRODUCT_ID,
+                                             TINYPAD_USB_PRODUCT_STRING);
+    CHECK(!device_discovery_matches(&info));
+}
+
+static void test_device_discovery_find_scans_candidate_list(void)
+{
+    CHECK(device_discovery_find(NULL, 0) == -1);
+
+    serial_port_info_t ports[3] = {
+        make_port_info(0x1234, 0x0001, "Unrelated Device"),
+        make_port_info(TINYPAD_USB_VENDOR_ID, TINYPAD_USB_PRODUCT_ID, TINYPAD_USB_PRODUCT_STRING),
+        make_port_info(0x5678, 0x0002, "Another Device"),
+    };
+    CHECK(device_discovery_find(ports, 3) == 1);
+
+    serial_port_info_t no_match[2] = {
+        make_port_info(0x1234, 0x0001, "Unrelated Device"),
+        make_port_info(0x5678, 0x0002, "Another Device"),
+    };
+    CHECK(device_discovery_find(no_match, 2) == -1);
 }
 
 // --- macro_map.c -------------------------------------------------------------
@@ -338,6 +402,18 @@ typedef struct {
     float last_set_volume;
     uint32_t last_set_muted_session;
     bool last_set_muted;
+
+    // Fake "system output" -- see audio_backend_vtable_t's get_master()/
+    // set_master_volume()/set_master_muted(). has_master toggles whether
+    // get_master() reports one at all (a backend without master support
+    // leaves these NULL; has_master=false here stands in for that).
+    bool has_master;
+    float master_volume, master_peak;
+    bool master_muted;
+    bool set_master_volume_result, set_master_muted_result;
+    float last_set_master_volume;
+    bool last_set_master_muted;
+    int get_master_calls;
 } fake_backend_t;
 
 static fake_backend_t g_fake;
@@ -347,6 +423,10 @@ static audio_backend_t *fake_create(void)
     memset(&g_fake, 0, sizeof(g_fake));
     g_fake.set_volume_result = true;
     g_fake.set_muted_result = true;
+    g_fake.has_master = true;
+    g_fake.master_volume = 1.0f;
+    g_fake.set_master_volume_result = true;
+    g_fake.set_master_muted_result = true;
     return (audio_backend_t *)&g_fake;
 }
 
@@ -380,6 +460,35 @@ static void fake_set_callbacks(audio_backend_t *backend, audio_session_cb on_add
     g_fake.user_data = user_data;
 }
 
+static bool fake_get_master(audio_backend_t *backend, audio_session_t *out)
+{
+    (void)backend;
+    g_fake.get_master_calls++;
+    if (!g_fake.has_master) {
+        return false;
+    }
+    out->id = 0; // ignored by mixer_state_poll(), which substitutes its own sentinel
+    snprintf(out->name, sizeof(out->name), "Master");
+    out->volume = g_fake.master_volume;
+    out->peak = g_fake.master_peak;
+    out->muted = g_fake.master_muted;
+    return true;
+}
+
+static bool fake_set_master_volume(audio_backend_t *backend, float volume)
+{
+    (void)backend;
+    g_fake.last_set_master_volume = volume;
+    return g_fake.set_master_volume_result;
+}
+
+static bool fake_set_master_muted(audio_backend_t *backend, bool muted)
+{
+    (void)backend;
+    g_fake.last_set_master_muted = muted;
+    return g_fake.set_master_muted_result;
+}
+
 static const audio_backend_vtable_t g_fake_vtable = {
     .create = fake_create,
     .destroy = fake_destroy,
@@ -387,6 +496,9 @@ static const audio_backend_vtable_t g_fake_vtable = {
     .set_volume = fake_set_volume,
     .set_muted = fake_set_muted,
     .set_callbacks = fake_set_callbacks,
+    .get_master = fake_get_master,
+    .set_master_volume = fake_set_master_volume,
+    .set_master_muted = fake_set_master_muted,
 };
 
 static audio_session_t make_session(uint32_t id, const char *name, float volume, bool muted)
@@ -520,6 +632,93 @@ static void test_mixer_state_toggle_mute(void)
     mixer_state_destroy(state);
 }
 
+static void test_mixer_state_assign_master_slot(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    // No on_added needed -- MIXER_MASTER_SESSION_ID isn't looked up in the
+    // session table.
+    CHECK(mixer_state_assign_slot(state, 1, MIXER_MASTER_SESSION_ID));
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 1, &slot);
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == MIXER_MASTER_SESSION_ID);
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_poll_syncs_master_into_slot(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+    mixer_state_assign_slot(state, 0, MIXER_MASTER_SESSION_ID);
+
+    g_fake.master_volume = 0.4f;
+    g_fake.master_peak = 0.6f;
+    g_fake.master_muted = true;
+    mixer_state_poll(state);
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.volume == 40);
+    CHECK(slot.peak == 60);
+    CHECK(slot.muted == true);
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_poll_ignores_master_when_unsupported(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+    mixer_state_assign_slot(state, 0, MIXER_MASTER_SESSION_ID);
+
+    g_fake.has_master = false;
+    mixer_state_poll(state); // must not crash/misbehave when get_master() fails
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.assigned); // still master-bound, just not refreshed this tick
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_set_volume_routes_to_master(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+    mixer_state_assign_slot(state, 2, MIXER_MASTER_SESSION_ID);
+
+    CHECK(mixer_state_set_slot_volume(state, 2, 65));
+    CHECK(g_fake.last_set_master_volume > 0.64f && g_fake.last_set_master_volume < 0.66f);
+    // Must not also go through the per-session path.
+    CHECK(g_fake.last_set_volume_session == 0);
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 2, &slot);
+    CHECK(slot.volume == 65);
+
+    mixer_state_destroy(state);
+}
+
+static void test_mixer_state_toggle_mute_routes_to_master(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+    mixer_state_assign_slot(state, 3, MIXER_MASTER_SESSION_ID);
+
+    CHECK(mixer_state_toggle_slot_mute(state, 3));
+    CHECK(g_fake.last_set_master_muted == true);
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 3, &slot);
+    CHECK(slot.muted == true);
+
+    // Toggling again flips back, based on the slot's own last-synced state
+    // (master isn't in state->sessions[], unlike the per-app path).
+    CHECK(mixer_state_toggle_slot_mute(state, 3));
+    CHECK(g_fake.last_set_master_muted == false);
+
+    mixer_state_destroy(state);
+}
+
 static void test_mixer_state_build_packets_reflect_assignment(void)
 {
     mixer_state_t *state = mixer_state_create(&g_fake_vtable);
@@ -531,7 +730,6 @@ static void test_mixer_state_build_packets_reflect_assignment(void)
 
     levels_packet levels;
     mixer_state_build_levels_packet(state, &levels);
-    CHECK(levels.valid == 1);
     CHECK(levels.channels[0].volume == 50);
     CHECK(levels.channels[1].volume == 0); // unassigned slot
 
@@ -752,7 +950,6 @@ static void test_mixer_state_with_simulated_backend_auto_assigns(void)
         mixer_state_poll(state);
         levels_packet levels;
         mixer_state_build_levels_packet(state, &levels);
-        CHECK(levels.valid == 1);
         for (int i = 0; i < MIXER_CHANNELS; i++) {
             if (levels.channels[i].left > 0) {
                 saw_nonzero_peak = true;
@@ -1021,6 +1218,11 @@ int main(void)
     RUN_TEST(test_protocol_reader_resyncs_after_bad_checksum);
     RUN_TEST(test_protocol_normalize_gui_layout_clears_bad_entries);
 
+    RUN_TEST(test_device_discovery_matches_by_vendor_and_product_string);
+    RUN_TEST(test_device_discovery_falls_back_to_pid_without_product_string);
+    RUN_TEST(test_device_discovery_rejects_wrong_vendor);
+    RUN_TEST(test_device_discovery_find_scans_candidate_list);
+
     RUN_TEST(test_macro_map_defaults);
     RUN_TEST(test_macro_map_set_get_roundtrip);
     RUN_TEST(test_macro_map_out_of_range_is_noop);
@@ -1037,6 +1239,11 @@ int main(void)
     RUN_TEST(test_mixer_state_set_volume_updates_slot_and_backend);
     RUN_TEST(test_mixer_state_adjust_volume_clamps);
     RUN_TEST(test_mixer_state_toggle_mute);
+    RUN_TEST(test_mixer_state_assign_master_slot);
+    RUN_TEST(test_mixer_state_poll_syncs_master_into_slot);
+    RUN_TEST(test_mixer_state_poll_ignores_master_when_unsupported);
+    RUN_TEST(test_mixer_state_set_volume_routes_to_master);
+    RUN_TEST(test_mixer_state_toggle_mute_routes_to_master);
     RUN_TEST(test_mixer_state_build_packets_reflect_assignment);
     RUN_TEST(test_mixer_state_set_backend_clears_sessions_and_slots);
     RUN_TEST(test_mixer_state_pending_assignment_immediate);
