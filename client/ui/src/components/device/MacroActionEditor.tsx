@@ -12,13 +12,16 @@ import {
 interface MacroActionEditorProps {
   trigger: number;
   action: MacroAction;
+  // Forwarded to KeystrokeEditor -- lets the parent dialog suppress its own
+  // close-on-Escape while a keystroke recording is in progress.
+  onKeystrokeRecordingChange?: (recording: boolean) => void;
 }
 
 // The "what does this button do" half of a key/knob-button's config
 // dialog -- action type, plus whichever detail that type needs (a target
 // channel, or a keystroke sequence). Shared between switches (KeyButton)
 // and encoder buttons (KnobButton), which both bind to a macro_trigger_t.
-export function MacroActionEditor({ trigger, action }: MacroActionEditorProps) {
+export function MacroActionEditor({ trigger, action, onKeystrokeRecordingChange }: MacroActionEditorProps) {
   const targetSlot = Math.max(0, action.targetSlot);
 
   function setType(type: MacroActionType) {
@@ -60,7 +63,11 @@ export function MacroActionEditor({ trigger, action }: MacroActionEditorProps) {
       )}
 
       {action.type === MacroActionType.SendKeystroke && (
-        <KeystrokeEditor steps={action.steps} onCommit={setSteps} />
+        <KeystrokeEditor
+          steps={action.steps}
+          onCommit={setSteps}
+          onRecordingChange={onKeystrokeRecordingChange}
+        />
       )}
     </div>
   );

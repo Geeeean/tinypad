@@ -25,6 +25,7 @@ export function KeyButton({ index, action, label }: KeyButtonProps) {
   const [open, setOpen] = useState(false);
   const [labelText, setLabelText] = useState(label);
   const [focused, setFocused] = useState(false);
+  const [recordingKeystroke, setRecordingKeystroke] = useState(false);
 
   useEffect(() => {
     if (!focused) {
@@ -54,7 +55,18 @@ export function KeyButton({ index, action, label }: KeyButtonProps) {
         <span className="max-w-full truncate px-1">{displayLabel}</span>
       </button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen, eventDetails) => {
+          // Escape is itself a valid macro key -- don't let it also close
+          // the dialog while KeystrokeEditor's record mode is listening.
+          if (eventDetails.reason === "escape-key" && recordingKeystroke) {
+            eventDetails.cancel();
+            return;
+          }
+          setOpen(nextOpen);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Switch {index + 1}</DialogTitle>
@@ -86,7 +98,11 @@ export function KeyButton({ index, action, label }: KeyButtonProps) {
 
           <div className="flex flex-col gap-2 border-t pt-3">
             <h3 className="text-xs font-semibold text-muted-foreground uppercase">Action</h3>
-            <MacroActionEditor trigger={index} action={action} />
+            <MacroActionEditor
+              trigger={index}
+              action={action}
+              onKeystrokeRecordingChange={setRecordingKeystroke}
+            />
           </div>
         </DialogContent>
       </Dialog>
