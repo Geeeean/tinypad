@@ -174,8 +174,23 @@ void mixer_state_poll(mixer_state_t *state)
     audio_backend_t *backend = state->backend;
     mutex_unlock(&state->lock);
 
-    if (backend) {
-        vtable->poll(backend);
+    if (!backend) {
+        return;
+    }
+
+    vtable->poll(backend);
+
+    if (vtable->get_master) {
+        audio_session_t master;
+        if (vtable->get_master(backend, &master)) {
+            // Reserved sentinel, not whatever (if anything) the backend put
+            // in `id` -- sync_slots_locked() only cares that this matches
+            // MIXER_MASTER_SESSION_ID-bound slots.
+            master.id = MIXER_MASTER_SESSION_ID;
+            mutex_lock(&state->lock);
+            sync_slots_locked(state, &master);
+            mutex_unlock(&state->lock);
+        }
     }
 }
 
@@ -216,6 +231,14 @@ size_t mixer_state_list_sessions(mixer_state_t *state, audio_session_t *out, siz
     size_t n = state->session_count < max_out ? state->session_count : max_out;
     memcpy(out, state->sessions, n * sizeof(audio_session_t));
     mutex_unlock(&state->lock);
+
+    // Same as mixer_state_build_levels_packet(): a muted session should look
+    // silent on the meter, not show the source's raw pre-mute loudness.
+    for (size_t i = 0; i < n; i++) {
+        if (out[i].muted) {
+            out[i].peak = 0.0f;
+        }
+    }
     return n;
 }
 
@@ -226,6 +249,25 @@ bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id
     }
 
     mutex_lock(&state->lock);
+
+    if (session_id == MIXER_MASTER_SESSION_ID) {
+        // Not one of state->sessions[] -- there's nothing to look up here.
+        // The real volume/peak/muted arrive from the next mixer_state_poll()
+        // tick's get_master() sync; these are just reasonable placeholders
+        // until then (matches "assigned" behaving usably the instant a knob
+        // is turned, same as a fresh per-app assignment does via the lookup
+        // below).
+        state->slots[slot].assigned = true;
+        state->slots[slot].session_id = MIXER_MASTER_SESSION_ID;
+        state->slots[slot].volume = 100;
+        state->slots[slot].peak = 0;
+        state->slots[slot].muted = false;
+        copy_slot_name(state->slots[slot].name, "Master");
+        state->has_pending[slot] = false;
+        mutex_unlock(&state->lock);
+        return true;
+    }
+
     int idx = find_session_index_locked(state, session_id);
     if (idx < 0) {
         mutex_unlock(&state->lock);
@@ -290,10 +332,14 @@ static bool set_slot_volume_locked(mixer_state_t *state, int slot, uint8_t volum
     }
 
     uint32_t session_id = s->session_id;
+    bool is_master = session_id == MIXER_MASTER_SESSION_ID;
     const audio_backend_vtable_t *vtable = state->vtable;
     audio_backend_t *backend = state->backend;
     mutex_unlock(&state->lock);
-    bool ok = backend && vtable->set_volume(backend, session_id, volume_percent / 100.0f);
+    float volume = volume_percent / 100.0f;
+    bool ok = is_master ? (backend && vtable->set_master_volume &&
+                           vtable->set_master_volume(backend, volume))
+                        : (backend && vtable->set_volume(backend, session_id, volume));
     mutex_lock(&state->lock);
 
     if (ok) {
@@ -356,19 +402,39 @@ bool mixer_state_toggle_slot_mute(mixer_state_t *state, int slot)
     }
 
     uint32_t session_id = s->session_id;
-    int idx = find_session_index_locked(state, session_id);
-    bool new_muted = idx >= 0 ? !state->sessions[idx].muted : true;
+    bool is_master = session_id == MIXER_MASTER_SESSION_ID;
+    // Master isn't in state->sessions[], so its current muted state (last
+    // synced from get_master()) lives only on the slot itself.
+    bool new_muted;
+    if (is_master) {
+        new_muted = !s->muted;
+    } else {
+        int idx = find_session_index_locked(state, session_id);
+        new_muted = idx >= 0 ? !state->sessions[idx].muted : true;
+    }
     const audio_backend_vtable_t *vtable = state->vtable;
     audio_backend_t *backend = state->backend;
 
     mutex_unlock(&state->lock);
-    bool ok = backend && vtable->set_muted(backend, session_id, new_muted);
+    bool ok = is_master ? (backend && vtable->set_master_muted &&
+                           vtable->set_master_muted(backend, new_muted))
+                        : (backend && vtable->set_muted(backend, session_id, new_muted));
     mutex_lock(&state->lock);
 
     if (ok) {
-        idx = find_session_index_locked(state, session_id);
-        if (idx >= 0) {
-            state->sessions[idx].muted = new_muted;
+        if (is_master) {
+            // Re-check the slot is still master-bound -- it may have been
+            // reassigned/cleared while the lock was released above (the
+            // same re-check the non-master branch already does via
+            // find_session_index_locked() below).
+            if (s->assigned && s->session_id == MIXER_MASTER_SESSION_ID) {
+                s->muted = new_muted;
+            }
+        } else {
+            int idx = find_session_index_locked(state, session_id);
+            if (idx >= 0) {
+                state->sessions[idx].muted = new_muted;
+            }
         }
     }
     mutex_unlock(&state->lock);
@@ -378,20 +444,21 @@ bool mixer_state_toggle_slot_mute(mixer_state_t *state, int slot)
 void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out)
 {
     channel_level channels[MIXER_CHANNELS];
-    uint8_t any_assigned = 0;
 
     mutex_lock(&state->lock);
     for (int i = 0; i < MIXER_CHANNELS; i++) {
         mixer_slot_t *s = &state->slots[i];
         channels[i].volume = s->assigned ? s->volume : 0;
-        channels[i].left = s->assigned ? s->peak : 0;
-        channels[i].right = s->assigned ? s->peak : 0;
+        // Muted reads as a flat 0 on the meter rather than the source's raw
+        // (pre-mute) loudness -- a muted channel should visually look
+        // silent, even though the backend still measures the source itself.
+        channels[i].left = (s->assigned && !s->muted) ? s->peak : 0;
+        channels[i].right = (s->assigned && !s->muted) ? s->peak : 0;
         channels[i].muted = s->assigned && s->muted;
-        any_assigned |= s->assigned ? 1 : 0;
     }
     mutex_unlock(&state->lock);
 
-    protocol_build_levels_packet(out, channels, any_assigned);
+    protocol_build_levels_packet(out, channels);
 }
 
 void mixer_state_build_metadata_packet(mixer_state_t *state, metadata_packet *out)

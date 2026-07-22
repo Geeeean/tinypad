@@ -2,7 +2,13 @@
 // pipewire_interface.c/state.c pair: same node enumeration, volume control
 // (cubic taper) and peak-metering approach, restructured behind the
 // audio_backend_vtable_t interface and reporting sessions as value snapshots
-// instead of owning shared global state.
+// instead of owning shared global state. Also implements master (system
+// output) volume/mute/peak by tracking the default sink via the "default"
+// metadata object's "default.audio.sink" property, reusing the exact same
+// per-node volume/mute/meter machinery already built for per-app sessions
+// (a sink node responds to the same SPA_PARAM_Props mechanism a stream node
+// does). Not build-verified -- no PipeWire/Linux environment on this dev
+// machine, same standing caveat as the rest of this file.
 //
 // PipeWire already drives everything from its own thread (pw_thread_loop,
 // started in create()), so poll() is a no-op -- on_added/on_updated/
@@ -10,6 +16,7 @@
 
 #include "platform/audio_backend.h"
 #include <math.h>
+#include <pipewire/extensions/metadata.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
@@ -26,7 +33,9 @@
 typedef struct {
     uint32_t id;
     bool active;
-    char name[AUDIO_SESSION_NAME_LEN];
+    char name[AUDIO_SESSION_NAME_LEN];      // display name (description/nick/media name)
+    char node_name[AUDIO_SESSION_NAME_LEN]; // raw PW_KEY_NODE_NAME -- what "default.audio.sink"
+                                            // metadata identifies a node by, unrelated to `name`
     _Atomic float volume;
     _Atomic float peak;
     bool muted;
@@ -57,6 +66,17 @@ struct audio_backend {
 
     backend_node_t nodes[MAX_BACKEND_NODES];
 
+    // Master (system output) -- the default sink, identified via the
+    // "default" metadata object's "default.audio.sink" property (see
+    // on_metadata_property()) rather than a fixed node id, since the
+    // default sink can change while running (e.g. user plugs in
+    // headphones). Reuses the same backend_node_t entry/apply_node_volume/
+    // apply_node_mute machinery as per-app sessions -- a sink node responds
+    // to the same SPA_PARAM_Props mechanism a stream node does.
+    struct pw_metadata *metadata;
+    struct spa_hook metadata_listener;
+    char default_sink_name[AUDIO_SESSION_NAME_LEN];
+
     audio_session_cb on_added;
     audio_session_cb on_updated;
     audio_session_cb on_removed;
@@ -70,6 +90,56 @@ static void build_session_snapshot(backend_node_t *node, audio_session_t *out)
     out->volume = atomic_load(&node->volume);
     out->peak = atomic_load(&node->peak);
     out->muted = node->muted;
+}
+
+static backend_node_t *find_node_by_name(audio_backend_t *backend, const char *name)
+{
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    for (int i = 0; i < MAX_BACKEND_NODES; i++) {
+        if (backend->nodes[i].active && strcmp(backend->nodes[i].node_name, name) == 0) {
+            return &backend->nodes[i];
+        }
+    }
+    return NULL;
+}
+
+// Extracts the "name" field from a PipeWire metadata value like
+// {"name":"alsa_output.pci-0000_00_1f.3.analog-stereo"} -- confirmed
+// against wireplumber's own module-default-nodes-api.c, which parses
+// "default.audio.sink" the same way (wp_spa_json_object_get(json, "name",
+// ...)). A tiny hand-rolled extractor rather than pulling in a
+// JSON/SPA-JSON parser dependency for one field; assumes this simple flat
+// shape rather than handling arbitrary SPA-JSON.
+static bool extract_json_name_field(const char *value, char *out, size_t out_size)
+{
+    if (!value) {
+        return false;
+    }
+    const char *key = strstr(value, "\"name\"");
+    if (!key) {
+        return false;
+    }
+    const char *colon = strchr(key, ':');
+    if (!colon) {
+        return false;
+    }
+    const char *quote1 = strchr(colon, '"');
+    if (!quote1) {
+        return false;
+    }
+    const char *quote2 = strchr(quote1 + 1, '"');
+    if (!quote2) {
+        return false;
+    }
+    size_t len = (size_t)(quote2 - (quote1 + 1));
+    if (len >= out_size) {
+        len = out_size - 1;
+    }
+    memcpy(out, quote1 + 1, len);
+    out[len] = '\0';
+    return true;
 }
 
 static backend_node_t *find_node(audio_backend_t *backend, uint32_t id)
@@ -286,6 +356,31 @@ static const struct pw_node_events node_events = {
     .param = node_event_param,
 };
 
+// Fires for every property of the "default" metadata object; only
+// "default.audio.sink" (subject == PW_ID_CORE, the global default rather
+// than some other object's own metadata) is relevant here.
+static int on_metadata_property(void *data, uint32_t subject, const char *key, const char *type,
+                                const char *value)
+{
+    (void)type;
+    audio_backend_t *backend = data;
+
+    if (subject != PW_ID_CORE || !key || strcmp(key, "default.audio.sink") != 0) {
+        return 0;
+    }
+
+    if (!value || !extract_json_name_field(value, backend->default_sink_name,
+                                           sizeof(backend->default_sink_name))) {
+        backend->default_sink_name[0] = '\0';
+    }
+    return 0;
+}
+
+static const struct pw_metadata_events metadata_events = {
+    PW_VERSION_METADATA_EVENTS,
+    .property = on_metadata_property,
+};
+
 static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
                                   const char *type, uint32_t version,
                                   const struct spa_dict *props)
@@ -294,6 +389,23 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
     (void)version;
     registry_ctx_t *ctx = data;
     audio_backend_t *backend = ctx->backend;
+
+    // The "default" metadata object -- carries "default.audio.sink" (among
+    // others), which on_metadata_property() below uses to track which node
+    // is the current master/system output. Bound once; there's normally
+    // exactly one "default" metadata global.
+    if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+        const char *metadata_name = props ? spa_dict_lookup(props, PW_KEY_METADATA_NAME) : NULL;
+        if (metadata_name && strcmp(metadata_name, "default") == 0 && !backend->metadata) {
+            backend->metadata =
+                (struct pw_metadata *)pw_registry_bind(ctx->registry, id, type, PW_VERSION_METADATA, 0);
+            if (backend->metadata) {
+                pw_metadata_add_listener(backend->metadata, &backend->metadata_listener,
+                                         &metadata_events, backend);
+            }
+        }
+        return;
+    }
 
     if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0 || !props) {
         return;
@@ -324,6 +436,10 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
     node->active = true;
     node->backend = backend;
     snprintf(node->name, sizeof(node->name), "%s", display_name);
+    const char *raw_name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+    if (raw_name) {
+        snprintf(node->node_name, sizeof(node->node_name), "%s", raw_name);
+    }
     atomic_store(&node->volume, 1.0f);
     atomic_store(&node->peak, 0.0f);
 
@@ -441,6 +557,9 @@ static void pw_backend_destroy(audio_backend_t *backend)
                 destroy_node(&backend->nodes[i]);
             }
         }
+        if (backend->metadata) {
+            pw_proxy_destroy((struct pw_proxy *)backend->metadata);
+        }
         if (backend->registry) {
             pw_proxy_destroy((struct pw_proxy *)backend->registry);
         }
@@ -509,6 +628,61 @@ static void pw_backend_set_callbacks(audio_backend_t *backend, audio_session_cb 
     backend->user_data = user_data;
 }
 
+// --- master (system output) ---------------------------------------------------
+// The default sink, resolved by name each call via
+// find_node_by_name(backend->default_sink_name) (kept current by
+// on_metadata_property() above) -- not a fixed node id, since the default
+// sink can change while running.
+
+static bool pw_backend_get_master(audio_backend_t *backend, audio_session_t *out)
+{
+    if (!backend->loop) {
+        return false;
+    }
+
+    pw_thread_loop_lock(backend->loop);
+    backend_node_t *node = find_node_by_name(backend, backend->default_sink_name);
+    bool ok = node != NULL;
+    if (ok) {
+        build_session_snapshot(node, out);
+        snprintf(out->name, sizeof(out->name), "Master"); // override the sink's own node name
+    }
+    pw_thread_loop_unlock(backend->loop);
+    return ok;
+}
+
+static bool pw_backend_set_master_volume(audio_backend_t *backend, float volume)
+{
+    if (!backend->loop) {
+        return false;
+    }
+
+    pw_thread_loop_lock(backend->loop);
+    backend_node_t *node = find_node_by_name(backend, backend->default_sink_name);
+    bool ok = node && node->proxy;
+    if (ok) {
+        apply_node_volume(node->proxy, volume);
+    }
+    pw_thread_loop_unlock(backend->loop);
+    return ok;
+}
+
+static bool pw_backend_set_master_muted(audio_backend_t *backend, bool muted)
+{
+    if (!backend->loop) {
+        return false;
+    }
+
+    pw_thread_loop_lock(backend->loop);
+    backend_node_t *node = find_node_by_name(backend, backend->default_sink_name);
+    bool ok = node && node->proxy;
+    if (ok) {
+        apply_node_mute(node->proxy, muted);
+    }
+    pw_thread_loop_unlock(backend->loop);
+    return ok;
+}
+
 static const audio_backend_vtable_t vtable = {
     .create = pw_backend_create,
     .destroy = pw_backend_destroy,
@@ -516,6 +690,9 @@ static const audio_backend_vtable_t vtable = {
     .set_volume = pw_backend_set_volume,
     .set_muted = pw_backend_set_muted,
     .set_callbacks = pw_backend_set_callbacks,
+    .get_master = pw_backend_get_master,
+    .set_master_volume = pw_backend_set_master_volume,
+    .set_master_muted = pw_backend_set_master_muted,
 };
 
 const audio_backend_vtable_t *audio_backend_get_vtable(void) { return &vtable; }

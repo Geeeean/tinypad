@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider";
 import { MacroActionEditor } from "@/components/device/MacroActionEditor";
 import { assignSlot, clearSlot, setSlotVolume, toggleSlotMute } from "@/lib/native";
-import type { AudioSession, MacroAction, MixerSlot } from "@/types";
+import { MIXER_MASTER_SESSION_ID, type AudioSession, type MacroAction, type MixerSlot } from "@/types";
 
 // Tailwind has no directional border *color* utility, and this needs just
 // one side worth (the whole ring, actually, but still a single custom
@@ -37,6 +37,7 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
   const [open, setOpen] = useState(false);
   const [localVolume, setLocalVolume] = useState(slot.volume);
   const [dragging, setDragging] = useState(false);
+  const [recordingKeystroke, setRecordingKeystroke] = useState(false);
 
   useEffect(() => {
     if (!dragging) {
@@ -44,8 +45,10 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
     }
   }, [slot.volume, dragging]);
 
-  const session = sessions.find((s) => s.id === slot.sessionId);
-  const muted = slot.assigned && session ? session.muted : false;
+  // slot.muted (not a sessions[] lookup by id) since Master is never in the
+  // live sessions list -- only mixer_state's own slot sync tracks its mute
+  // state.
+  const muted = slot.assigned && slot.muted;
   const accent = SLOT_ACCENT_COLORS[index % SLOT_ACCENT_COLORS.length];
 
   return (
@@ -65,7 +68,18 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
         </span>
       </button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen, eventDetails) => {
+          // Escape is itself a valid macro key -- don't let it also close
+          // the dialog while KeystrokeEditor's record mode is listening.
+          if (eventDetails.reason === "escape-key" && recordingKeystroke) {
+            eventDetails.cancel();
+            return;
+          }
+          setOpen(nextOpen);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Knob {index + 1}</DialogTitle>
@@ -89,6 +103,7 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NONE_VALUE}>— none —</SelectItem>
+                <SelectItem value={String(MIXER_MASTER_SESSION_ID)}>Master</SelectItem>
                 {sessions.map((s) => (
                   <SelectItem key={s.id} value={String(s.id)}>
                     {s.name}
@@ -129,7 +144,11 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
 
           <div className="flex flex-col gap-2 border-t pt-3">
             <h3 className="text-xs font-semibold text-muted-foreground uppercase">Button (press)</h3>
-            <MacroActionEditor trigger={8 + index} action={buttonAction} />
+            <MacroActionEditor
+              trigger={8 + index}
+              action={buttonAction}
+              onKeystrokeRecordingChange={setRecordingKeystroke}
+            />
           </div>
         </DialogContent>
       </Dialog>

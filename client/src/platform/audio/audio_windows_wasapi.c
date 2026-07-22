@@ -1,7 +1,9 @@
 // WASAPI audio_backend implementation: per-application session volume/mute
 // control and peak metering via the default render endpoint's
-// IAudioSessionManager2. Not build-verified on this (non-Windows)
-// development machine -- review carefully and test on real hardware.
+// IAudioSessionManager2, plus the endpoint's own master (system output)
+// volume/mute/peak via IAudioEndpointVolume/IAudioMeterInformation. Not
+// build-verified on this (non-Windows) development machine -- review
+// carefully and test on real hardware.
 //
 // Session add/remove is detected by periodically re-enumerating
 // IAudioSessionEnumerator (every WASAPI_ENUM_INTERVAL_MS); volume/mute/peak
@@ -43,6 +45,11 @@ DEFINE_GUID(IID_ISimpleAudioVolume, 0x87ce5498, 0x68d6, 0x44e5, 0x92, 0x15, 0x6d
             0x83, 0xd8);
 DEFINE_GUID(IID_IAudioMeterInformation, 0xc02216f6, 0x8c67, 0x4b5b, 0x9d, 0x00, 0xd0, 0x08, 0xe7,
             0x3e, 0x00, 0x64);
+// Value cross-checked against mingw-w64's endpointvolume.h
+// (5CDF2C82-841E-4546-9722-0CF74078229A) -- same source/reasoning as the
+// GUIDs above.
+DEFINE_GUID(IID_IAudioEndpointVolume, 0x5cdf2c82, 0x841e, 0x4546, 0x97, 0x22, 0x0c, 0xf7, 0x40,
+            0x78, 0x22, 0x9a);
 
 #define MAX_BACKEND_SESSIONS 64
 #define WASAPI_ENUM_INTERVAL_MS 200
@@ -65,6 +72,12 @@ struct audio_backend {
     IMMDeviceEnumerator *enumerator;
     IMMDevice *device;
     IAudioSessionManager2 *session_manager;
+
+    // Master (system output) -- a device-level endpoint control, not a
+    // per-app session, so it's activated once on backend->device rather
+    // than per-session like volume_ctrl/meter above.
+    IAudioEndpointVolume *endpoint_volume;
+    IAudioMeterInformation *endpoint_meter;
 
     backend_session_t sessions[MAX_BACKEND_SESSIONS];
     ULONGLONG last_enum_tick;
@@ -294,6 +307,17 @@ static audio_backend_t *wasapi_create(void)
         return NULL;
     }
 
+    // Master (system output) controls -- unlike session_manager above,
+    // failing to activate these isn't fatal to the whole backend: per-app
+    // sessions still work fine without master support, same as how a
+    // per-session volume_ctrl/meter failing to activate doesn't abort
+    // rescan_sessions() either. get_master()/set_master_volume()/
+    // set_master_muted() below check these for NULL before use.
+    backend->device->lpVtbl->Activate(backend->device, &IID_IAudioEndpointVolume, CLSCTX_ALL, NULL,
+                                      (void **)&backend->endpoint_volume);
+    backend->device->lpVtbl->Activate(backend->device, &IID_IAudioMeterInformation, CLSCTX_ALL, NULL,
+                                      (void **)&backend->endpoint_meter);
+
     // Deliberately no initial rescan_sessions() call here: the caller
     // (mixer_state_create()) wires up on_added/on_updated/on_removed via
     // set_callbacks() *after* create() returns, so scanning now would find
@@ -319,6 +343,8 @@ static void wasapi_destroy(audio_backend_t *backend)
         }
     }
 
+    if (backend->endpoint_meter) backend->endpoint_meter->lpVtbl->Release(backend->endpoint_meter);
+    if (backend->endpoint_volume) backend->endpoint_volume->lpVtbl->Release(backend->endpoint_volume);
     if (backend->session_manager) backend->session_manager->lpVtbl->Release(backend->session_manager);
     if (backend->device) backend->device->lpVtbl->Release(backend->device);
     if (backend->enumerator) backend->enumerator->lpVtbl->Release(backend->enumerator);
@@ -370,6 +396,58 @@ static void wasapi_set_callbacks(audio_backend_t *backend, audio_session_cb on_a
     backend->user_data = user_data;
 }
 
+// --- master (system output) ---------------------------------------------------
+// A device-level endpoint control (IAudioEndpointVolume/IAudioMeterInformation
+// on backend->device, activated once in wasapi_create()), not a per-app
+// session -- simpler than the per-session path above, no
+// IAudioSessionManager2/enumeration involved.
+
+static bool wasapi_get_master(audio_backend_t *backend, audio_session_t *out)
+{
+    if (!backend->endpoint_volume) {
+        return false;
+    }
+
+    FLOAT volume = 0.0f;
+    if (FAILED(backend->endpoint_volume->lpVtbl->GetMasterVolumeLevelScalar(
+            backend->endpoint_volume, &volume))) {
+        return false;
+    }
+
+    BOOL muted = FALSE;
+    backend->endpoint_volume->lpVtbl->GetMute(backend->endpoint_volume, &muted);
+
+    float peak = 0.0f;
+    if (backend->endpoint_meter) {
+        backend->endpoint_meter->lpVtbl->GetPeakValue(backend->endpoint_meter, &peak);
+    }
+
+    out->id = 0; // ignored by mixer_state_poll(), which substitutes its own sentinel
+    snprintf(out->name, sizeof(out->name), "Master");
+    out->volume = volume;
+    out->peak = peak;
+    out->muted = (bool)muted;
+    return true;
+}
+
+static bool wasapi_set_master_volume(audio_backend_t *backend, float volume)
+{
+    if (!backend->endpoint_volume) {
+        return false;
+    }
+    return SUCCEEDED(backend->endpoint_volume->lpVtbl->SetMasterVolumeLevelScalar(
+        backend->endpoint_volume, volume, NULL));
+}
+
+static bool wasapi_set_master_muted(audio_backend_t *backend, bool muted)
+{
+    if (!backend->endpoint_volume) {
+        return false;
+    }
+    return SUCCEEDED(
+        backend->endpoint_volume->lpVtbl->SetMute(backend->endpoint_volume, muted, NULL));
+}
+
 static const audio_backend_vtable_t vtable = {
     .create = wasapi_create,
     .destroy = wasapi_destroy,
@@ -377,6 +455,9 @@ static const audio_backend_vtable_t vtable = {
     .set_volume = wasapi_set_volume,
     .set_muted = wasapi_set_muted,
     .set_callbacks = wasapi_set_callbacks,
+    .get_master = wasapi_get_master,
+    .set_master_volume = wasapi_set_master_volume,
+    .set_master_muted = wasapi_set_master_muted,
 };
 
 const audio_backend_vtable_t *audio_backend_get_vtable(void) { return &vtable; }

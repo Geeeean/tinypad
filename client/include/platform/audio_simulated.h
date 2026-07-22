@@ -4,8 +4,11 @@
 // never touches real OS audio: it reports a fixed set of MIXER_CHANNELS fake
 // sessions ("Simulated 1".."Simulated N") whose volume/peak are driven by
 // audio_simulated_set_level() and the vtable's own set_volume(), instead of
-// a real audio stack. Lets the UI's "Simulation" toggle (ui/ui_bridge.c)
-// exercise the device's VU meters/mixer without any audio actually playing.
+// a real audio stack. Also implements get_master()/set_master_volume()/
+// set_master_muted() with the same fake wandering-peak model, so a knob can
+// be assigned to "Master" in Simulation mode too. Lets the UI's
+// "Simulation" toggle (ui/ui_bridge.c) exercise the device's VU
+// meters/mixer without any audio actually playing.
 
 #include "platform/audio_backend.h"
 #include <stdint.h>

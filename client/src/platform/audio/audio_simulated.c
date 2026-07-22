@@ -40,6 +40,7 @@ struct audio_backend {
 static mutex_t g_lock;
 static bool g_lock_initialized = false;
 static sim_channel_t g_channels[MIXER_CHANNELS];
+static sim_channel_t g_master; // fake system/master output, same wander/volume/mute model
 static struct audio_backend *g_active = NULL;
 
 static void ensure_lock(void)
@@ -100,7 +101,7 @@ static void session_for_locked(int index, audio_session_t *out)
     out->id = SIM_SESSION_ID_BASE + (uint32_t)index;
     snprintf(out->name, AUDIO_SESSION_NAME_LEN, "Simulated %d", index + 1);
     out->volume = g_channels[index].volume;
-    out->peak = g_channels[index].peak;
+    out->peak = g_channels[index].peak * g_channels[index].volume;
     out->muted = g_channels[index].muted;
 }
 
@@ -126,6 +127,10 @@ static audio_backend_t *sim_create(void)
         uint32_t seed = (uint32_t)(i + 1) * 2654435761u;
         g_channels[i].rng = seed ? seed : 1u;
     }
+    memset(&g_master, 0, sizeof(g_master));
+    g_master.volume = 1.0f;
+    g_master.level = 0.6f;
+    g_master.rng = (uint32_t)(MIXER_CHANNELS + 1) * 2654435761u;
     g_active = backend;
     mutex_unlock(&g_lock);
 
@@ -166,6 +171,9 @@ static void sim_poll(audio_backend_t *backend)
         }
         session_for_locked(i, &out[i]);
     }
+    if (!first_poll) {
+        advance_channel_locked(&g_master);
+    }
     mutex_unlock(&g_lock);
 
     audio_session_cb cb = first_poll ? backend->on_added : backend->on_updated;
@@ -205,6 +213,37 @@ static bool sim_set_muted(audio_backend_t *backend, uint32_t session_id, bool mu
     return true;
 }
 
+static bool sim_get_master(audio_backend_t *backend, audio_session_t *out)
+{
+    (void)backend;
+    mutex_lock(&g_lock);
+    out->id = 0; // ignored by mixer_state_poll(), which substitutes its own sentinel
+    snprintf(out->name, AUDIO_SESSION_NAME_LEN, "Master");
+    out->volume = g_master.volume;
+    out->peak = g_master.peak * g_master.volume;
+    out->muted = g_master.muted;
+    mutex_unlock(&g_lock);
+    return true;
+}
+
+static bool sim_set_master_volume(audio_backend_t *backend, float volume)
+{
+    (void)backend;
+    mutex_lock(&g_lock);
+    g_master.volume = volume;
+    mutex_unlock(&g_lock);
+    return true;
+}
+
+static bool sim_set_master_muted(audio_backend_t *backend, bool muted)
+{
+    (void)backend;
+    mutex_lock(&g_lock);
+    g_master.muted = muted;
+    mutex_unlock(&g_lock);
+    return true;
+}
+
 static void sim_set_callbacks(audio_backend_t *backend, audio_session_cb on_added,
                               audio_session_cb on_updated, audio_session_cb on_removed,
                               void *user_data)
@@ -222,6 +261,9 @@ static const audio_backend_vtable_t g_sim_vtable = {
     .set_volume = sim_set_volume,
     .set_muted = sim_set_muted,
     .set_callbacks = sim_set_callbacks,
+    .get_master = sim_get_master,
+    .set_master_volume = sim_set_master_volume,
+    .set_master_muted = sim_set_master_muted,
 };
 
 const audio_backend_vtable_t *audio_simulated_get_vtable(void) { return &g_sim_vtable; }

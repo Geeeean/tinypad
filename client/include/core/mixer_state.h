@@ -13,6 +13,15 @@
 
 #define MIXER_MAX_SESSIONS 64
 
+// Reserved session id representing the system's total/master output --
+// never assigned by a real backend (macOS/Linux pids and Windows pids stay
+// far below this range; audio_simulated.c's fake per-channel ids start at
+// 0xF0000000). A slot bound to this id is synced from
+// audio_backend_vtable_t's get_master()/set_master_volume()/
+// set_master_muted() instead of the normal per-session table, since the
+// master output isn't one of the sessions a backend enumerates.
+#define MIXER_MASTER_SESSION_ID 0xFFFFFFFEu
+
 typedef struct {
     bool assigned;
     uint32_t session_id;

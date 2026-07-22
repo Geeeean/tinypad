@@ -52,6 +52,10 @@ export const MACRO_TRIGGER_LABELS = [
 ] as const;
 
 export const SLOT_COUNT = 4;
+// Mirrors MIXER_MASTER_SESSION_ID in include/core/mixer_state.h -- assigning
+// a slot to this id binds it to the system's total/master output instead of
+// any one AudioSession from the live `sessions` list.
+export const MIXER_MASTER_SESSION_ID = 0xfffffffe;
 export const MACRO_TRIGGER_COUNT = MACRO_TRIGGER_LABELS.length;
 // Mirrors MACRO_KEYSTROKE_MAX_STEPS in include/core/macro_map.h.
 export const MACRO_KEYSTROKE_MAX_STEPS = 64;
@@ -95,6 +99,7 @@ export interface MixerSlot {
   name: string;
   volume: number; // 0-100
   peak: number; // 0-100
+  muted: boolean;
 }
 
 export interface KeystrokeStep {
@@ -148,6 +153,7 @@ export const EMPTY_STATE: TinypadState = {
     name: "",
     volume: 0,
     peak: 0,
+    muted: false,
   })),
   macros: Array.from({ length: MACRO_TRIGGER_COUNT }, emptyMacroAction),
   deviceSettings: {

@@ -115,7 +115,8 @@ static void build_state_json(ui_bridge_t *bridge, strbuf_t *sb)
         sb_appendf(sb, "{\"assigned\":%s,\"sessionId\":%u,\"name\":",
                   slot.assigned ? "true" : "false", slot.session_id);
         sb_append_json_string(sb, slot.assigned ? slot.name : "");
-        sb_appendf(sb, ",\"volume\":%u,\"peak\":%u}", slot.volume, slot.peak);
+        sb_appendf(sb, ",\"volume\":%u,\"peak\":%u,\"muted\":%s}", slot.volume, slot.peak,
+                  slot.muted ? "true" : "false");
     }
 
     sb_appendf(sb, "],\"macros\":[");
