@@ -2,6 +2,7 @@
 
 #include "driver/gpio.h"
 #include "protocol.h"
+#include <atomic>
 #include <cstdint>
 
 // Reads the 2x4 key matrix and 4 rotary encoders, debounces/decodes them,
@@ -15,7 +16,11 @@ class InputManager {
     static constexpr int MATRIX_KEYS = MATRIX_ROWS * MATRIX_COLS;
     static constexpr int ENCODER_COUNT = 4;
 
-    void init();
+    // btn_held_out: an ENCODER_COUNT-sized array this instance mirrors its
+    // debounced per-encoder button-held state into (relaxed atomics --
+    // firmware.cpp owns the array, GUI reads it for the topbar's fine-step
+    // indicator). May be nullptr to skip the mirroring.
+    void init(std::atomic<bool> *btn_held_out);
     void start();
 
   private:
@@ -60,4 +65,6 @@ class InputManager {
     uint8_t _encoder_btn_debounce_count[ENCODER_COUNT] = {0};
     bool _encoder_btn_pressed[ENCODER_COUNT] = {false};
     bool _encoder_rotated_while_pressed[ENCODER_COUNT] = {false};
+
+    std::atomic<bool> *_shared_btn_held = nullptr;
 };

@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "protocol.h"
+#include <atomic>
 
 class USBManager {
   public:
@@ -12,6 +13,13 @@ class USBManager {
         // esp_timer_get_time() at the most recent valid LEVELS packet;
         // lets GUI detect a dead host and fall back to the idle screen.
         int64_t *shared_last_levels_us;
+        // Per-encoder "is the button currently held" state, written by
+        // InputManager on every scan tick and read by GUI for the topbar's
+        // fine-step indicator -- local hardware state, not mutex-protected
+        // like the packets above (a 1ms-period scan loop and atomics are
+        // the natural fit, not a mutex round trip). Indexed 0..MIXER_CHANNELS-1
+        // (== InputManager::ENCODER_COUNT, both the device's 4 physical knobs).
+        std::atomic<bool> *encoder_btn_held;
         SemaphoreHandle_t mutex;
     } Config;
 

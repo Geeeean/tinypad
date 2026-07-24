@@ -14,6 +14,15 @@ struct mixer_state {
 
     mixer_slot_t slots[MIXER_CHANNELS];
 
+    // The system's current master volume/mute, tracked every
+    // mixer_state_poll() tick regardless of whether any slot is actually
+    // assigned to MIXER_MASTER_SESSION_ID -- physically, Master attenuates
+    // every app's audible output whether or not a knob happens to show it.
+    // Defaults to no attenuation (1.0f/false) for a backend without
+    // get_master() support. See master_scaled_peak_locked().
+    float master_volume;
+    bool master_muted;
+
     // A slot with has_pending[i] set should auto-assign to the first
     // session whose name matches pending_names[i] (see
     // mixer_state_set_pending_assignment()). Same CHANNEL_NAME_LEN
@@ -57,6 +66,70 @@ static void sync_slots_locked(mixer_state_t *state, const audio_session_t *sessi
         slot->muted = session->muted;
         copy_slot_name(slot->name, session->name);
     }
+}
+
+// Caller must hold state->lock. Master's displayed peak is *derived* from
+// every currently known session's own peak (already each session's own
+// gain baked in, same as mixer_slot_t.peak -- see sync_slots_locked() and
+// every audio_backend's own peak reporting) rather than trusted from a
+// backend's own separate "system output" measurement (get_master()'s
+// peak): a per-app tap and a system-wide tap are two independent hardware
+// measurements sampled at different times, not guaranteed to agree even
+// with correct gain math, and it's unclear a global tap even observes a
+// manually volume-reinjected signal for an app below 100%. Deriving from
+// the same numbers every other slot already shows makes "Master matches
+// what's actually playing" true by construction instead of by hoping two
+// taps happen to agree. Combined the same way (RMS) the firmware combines
+// multiple channels for its own output graph, for consistency; sessions
+// contributing nothing right now (muted or currently silent) are excluded
+// so they can't dilute the average the same way empty channels can't there.
+static uint8_t derived_master_peak_locked(mixer_state_t *state)
+{
+    if (state->master_muted) {
+        return 0;
+    }
+
+    float sum_squares = 0.0f;
+    int count = 0;
+    for (size_t i = 0; i < state->session_count; i++) {
+        const audio_session_t *sess = &state->sessions[i];
+        if (sess->muted || sess->peak <= 0.0f) {
+            continue;
+        }
+        sum_squares += sess->peak * sess->peak;
+        count++;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    float rms = sqrtf(sum_squares / (float)count);
+    float scaled = rms * state->master_volume;
+    if (scaled > 1.0f) {
+        scaled = 1.0f;
+    }
+    return (uint8_t)lroundf(scaled * 100.0f);
+}
+
+// Caller must hold state->lock. `s` may point into state->slots[] or a
+// local copy (mixer_state_get_slot()'s out-param). A master-bound slot's
+// peak is the software-derived combination above; every other slot's own
+// (already gain-scaled) peak is additionally scaled by the system's current
+// master volume (zeroed if master itself is muted), since that reflects
+// what you'd actually hear. Deliberately doesn't touch the slot's *own*
+// mute state; each call site already has its own convention for that (e.g.
+// mixer_state_build_levels_packet zeroes for it, mixer_state_get_slot
+// always has passed the raw peak + a separate muted flag for the UI to
+// render itself).
+static uint8_t master_scaled_peak_locked(mixer_state_t *state, const mixer_slot_t *s)
+{
+    if (s->session_id == MIXER_MASTER_SESSION_ID) {
+        return derived_master_peak_locked(state);
+    }
+    if (state->master_muted) {
+        return 0;
+    }
+    return (uint8_t)lroundf(s->peak * state->master_volume);
 }
 
 // Assigns `slot` to a known session named `name` (a CHANNEL_NAME_LEN-1
@@ -142,6 +215,7 @@ mixer_state_t *mixer_state_create(const audio_backend_vtable_t *backend_vtable)
     }
 
     state->vtable = backend_vtable;
+    state->master_volume = 1.0f; // no attenuation until/unless get_master() says otherwise
     mutex_init(&state->lock);
 
     state->backend = backend_vtable->create();
@@ -188,6 +262,10 @@ void mixer_state_poll(mixer_state_t *state)
             // MIXER_MASTER_SESSION_ID-bound slots.
             master.id = MIXER_MASTER_SESSION_ID;
             mutex_lock(&state->lock);
+            // Tracked unconditionally (not just when a slot is master-bound)
+            // since every other slot's effective_peak_locked() needs it.
+            state->master_volume = master.volume;
+            state->master_muted = master.muted;
             sync_slots_locked(state, &master);
             mutex_unlock(&state->lock);
         }
@@ -203,6 +281,8 @@ void mixer_state_set_backend(mixer_state_t *state, const audio_backend_vtable_t 
     // sees "no backend" instead of a pointer we're about to destroy.
     state->backend = NULL;
     state->session_count = 0;
+    state->master_volume = 1.0f; // reset until the new backend's own get_master() reports in
+    state->master_muted = false;
     memset(state->slots, 0, sizeof(state->slots));
     memset(state->has_pending, 0, sizeof(state->has_pending)); // a different backend's
                                                                // sessions shouldn't fulfill
@@ -262,7 +342,7 @@ bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id
         state->slots[slot].volume = 100;
         state->slots[slot].peak = 0;
         state->slots[slot].muted = false;
-        copy_slot_name(state->slots[slot].name, "Master");
+        copy_slot_name(state->slots[slot].name, MIXER_MASTER_SESSION_NAME);
         state->has_pending[slot] = false;
         mutex_unlock(&state->lock);
         return true;
@@ -320,6 +400,7 @@ bool mixer_state_get_slot(mixer_state_t *state, int slot, mixer_slot_t *out)
     }
     mutex_lock(&state->lock);
     *out = state->slots[slot];
+    out->peak = master_scaled_peak_locked(state, out);
     mutex_unlock(&state->lock);
     return true;
 }
@@ -441,9 +522,34 @@ bool mixer_state_toggle_slot_mute(mixer_state_t *state, int slot)
     return ok;
 }
 
-void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out)
+size_t mixer_state_get_session_count(mixer_state_t *state)
+{
+    mutex_lock(&state->lock);
+    size_t count = state->session_count;
+    mutex_unlock(&state->lock);
+    return count;
+}
+
+// Caller must hold state->lock. Builds a channel_level for the topbar's
+// always-available master indicator (regardless of whether any slot is
+// actually assigned to MIXER_MASTER_SESSION_ID), reusing the same derived
+// peak every master-bound slot already shows.
+static channel_level master_channel_level_locked(mixer_state_t *state)
+{
+    channel_level level;
+    level.volume = (uint8_t)lroundf(state->master_volume * 100.0f);
+    level.left = state->master_muted ? 0 : derived_master_peak_locked(state);
+    level.right = level.left;
+    level.muted = state->master_muted;
+    return level;
+}
+
+void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out,
+                                     uint8_t clock_hour, uint8_t clock_minute)
 {
     channel_level channels[MIXER_CHANNELS];
+    channel_level master;
+    uint8_t session_count;
 
     mutex_lock(&state->lock);
     for (int i = 0; i < MIXER_CHANNELS; i++) {
@@ -452,13 +558,19 @@ void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out)
         // Muted reads as a flat 0 on the meter rather than the source's raw
         // (pre-mute) loudness -- a muted channel should visually look
         // silent, even though the backend still measures the source itself.
-        channels[i].left = (s->assigned && !s->muted) ? s->peak : 0;
-        channels[i].right = (s->assigned && !s->muted) ? s->peak : 0;
+        // master_scaled_peak_locked() additionally folds in the system's
+        // current master volume/mute for non-master slots, since that's
+        // what you'd actually hear.
+        uint8_t peak = (s->assigned && !s->muted) ? master_scaled_peak_locked(state, s) : 0;
+        channels[i].left = peak;
+        channels[i].right = peak;
         channels[i].muted = s->assigned && s->muted;
     }
+    master = master_channel_level_locked(state);
+    session_count = (uint8_t)(state->session_count < 255 ? state->session_count : 255);
     mutex_unlock(&state->lock);
 
-    protocol_build_levels_packet(out, channels);
+    protocol_build_levels_packet(out, channels, &master, session_count, clock_hour, clock_minute);
 }
 
 void mixer_state_build_metadata_packet(mixer_state_t *state, metadata_packet *out)

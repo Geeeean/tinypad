@@ -72,10 +72,37 @@ enum {
   GUI_COMPONENT_VU_METERS = 0,
   GUI_COMPONENT_WAVEFORM = 1,
   GUI_COMPONENT_MACRO_GRID = 2,
+  GUI_COMPONENT_CHANNEL_ROWS = 3, // 4 channels as horizontal rows: name/%, live-level bar, mini vumeter
 
   GUI_COMPONENT_COUNT
 };
 #define GUI_COMPONENT_NONE 0xFF // sentinel: this slot is disabled
+
+// Topbar item kinds. device_config_packet.topbar_items is TOPBAR_SLOT_COUNT
+// fixed positions (not a reorderable stack like gui_layout above) -- each
+// independently shows one of these, or is disabled via TOPBAR_ITEM_NONE.
+// Duplicates across slots are allowed (unlike gui_layout, not deduped by
+// protocol_normalize_topbar_items()).
+enum {
+  TOPBAR_ITEM_CONNECTION = 0,   // host linked/idle
+  TOPBAR_ITEM_ANY_MUTED = 1,    // any of the 4 channels currently muted
+  TOPBAR_ITEM_CLIP_WARNING = 2, // any channel's peak pinned near 100
+  TOPBAR_ITEM_ACTIVE_CHANNELS = 3, // count of channels assigned+unmuted+sounding
+  TOPBAR_ITEM_OUTPUT_LEVEL = 4,    // the waveform graph's current smoothed value
+  TOPBAR_ITEM_LOUDEST_CHANNEL = 5, // which channel currently peaks highest
+  TOPBAR_ITEM_UPTIME = 6,          // device uptime since boot
+  TOPBAR_ITEM_FINE_STEP = 7,       // a knob's button is held (fine-step mode)
+  TOPBAR_ITEM_MASTER_VOLUME = 8,   // levels_packet.master volume/mute
+  TOPBAR_ITEM_PROFILE_NAME = 9,    // device_config_packet.active_profile_name
+  TOPBAR_ITEM_SESSION_COUNT = 10,  // levels_packet.session_count
+  TOPBAR_ITEM_CLOCK = 11,          // levels_packet.clock_hour/clock_minute
+
+  TOPBAR_ITEM_COUNT
+};
+#define TOPBAR_ITEM_NONE 0xFF // sentinel: this slot is disabled
+#define TOPBAR_SLOT_COUNT 3
+#define PROFILE_NAME_WIRE_LEN 16 // fixed, null-padded, same contract as CHANNEL_NAME_LEN
+#define CLOCK_UNKNOWN 0xFF // sentinel for clock_hour/clock_minute when the host has no clock
 
 #if defined(__GNUC__) || defined(__clang__)
 #define PROTOCOL_PACKED __attribute__((packed))
@@ -104,6 +131,12 @@ typedef struct PROTOCOL_PACKED {
 typedef struct PROTOCOL_PACKED {
   protocol_header_t hdr; // type = PROTOCOL_PACKET_LEVELS
   channel_level channels[MIXER_CHANNELS];
+  channel_level master;    // system master volume/peak/muted, always sent
+                           // (regardless of whether a slot is assigned to it)
+  uint8_t session_count;   // total audio sessions the host currently sees,
+                           // clamped to 0-255
+  uint8_t clock_hour;      // 0-23, or CLOCK_UNKNOWN if the host has no clock
+  uint8_t clock_minute;    // 0-59, or CLOCK_UNKNOWN if the host has no clock
 } levels_packet;
 
 typedef struct PROTOCOL_PACKED {
@@ -122,6 +155,9 @@ typedef struct PROTOCOL_PACKED {
   uint8_t gui_layout[GUI_COMPONENT_COUNT]; // draw order, top-to-bottom;
                                            // GUI_COMPONENT_NONE disables
                                            // that slot
+  uint8_t topbar_items[TOPBAR_SLOT_COUNT]; // 3 fixed positions, each a
+                                           // TOPBAR_ITEM_* id or _NONE
+  char active_profile_name[PROFILE_NAME_WIRE_LEN]; // truncated, null-padded
 } device_config_packet;
 
 #if defined(_MSC_VER)
@@ -162,7 +198,9 @@ bool protocol_parse_packet(uint8_t expected_type, const uint8_t *raw_buffer,
   protocol_parse_packet((type_const), (buf), (size), (out), sizeof(*(out)))
 
 void protocol_build_levels_packet(levels_packet *out_packet,
-                                  const channel_level channels[MIXER_CHANNELS]);
+                                  const channel_level channels[MIXER_CHANNELS],
+                                  const channel_level *master, uint8_t session_count,
+                                  uint8_t clock_hour, uint8_t clock_minute);
 void protocol_build_metadata_packet(
     metadata_packet *out_packet,
     const char names[MIXER_CHANNELS][CHANNEL_NAME_LEN]);
@@ -171,11 +209,20 @@ void protocol_build_command_event_packet(uint8_t command,
 void protocol_build_device_config_packet(
     device_config_packet *out_packet,
     const char macro_labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN],
-    const uint8_t gui_layout[GUI_COMPONENT_COUNT]);
+    const uint8_t gui_layout[GUI_COMPONENT_COUNT],
+    const uint8_t topbar_items[TOPBAR_SLOT_COUNT],
+    const char active_profile_name[PROFILE_NAME_WIRE_LEN]);
 
 // Clears any out-of-range or duplicate id to GUI_COMPONENT_NONE in place.
 // Already applied when building a packet; a raw parsed one still needs it.
 void protocol_normalize_gui_layout(uint8_t gui_layout[GUI_COMPONENT_COUNT]);
+
+// Clears any out-of-range id to TOPBAR_ITEM_NONE in place. Unlike
+// protocol_normalize_gui_layout(), duplicates across slots are left alone --
+// the topbar's 3 positions are independent, not a reorderable stack, so
+// showing the same item twice is harmless. Already applied when building a
+// packet; a raw parsed one still needs it.
+void protocol_normalize_topbar_items(uint8_t topbar_items[TOPBAR_SLOT_COUNT]);
 
 // --- Resumable byte-stream framing --------------------------------------
 // Shared by both sides' serial receive loop: feed it one byte at a time and

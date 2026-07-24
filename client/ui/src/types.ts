@@ -49,6 +49,12 @@ export const MACRO_TRIGGER_LABELS = [
   "Switch 1", "Switch 2", "Switch 3", "Switch 4",
   "Switch 5", "Switch 6", "Switch 7", "Switch 8",
   "Encoder 1 button", "Encoder 2 button", "Encoder 3 button", "Encoder 4 button",
+  // Rotation defaults to volume control (device_link.c) unless bound here --
+  // e.g. spin-right could fire a macro while spin-left still adjusts volume.
+  "Encoder 1 rotate right", "Encoder 1 rotate left",
+  "Encoder 2 rotate right", "Encoder 2 rotate left",
+  "Encoder 3 rotate right", "Encoder 3 rotate left",
+  "Encoder 4 rotate right", "Encoder 4 rotate left",
 ] as const;
 
 export const SLOT_COUNT = 4;
@@ -57,6 +63,17 @@ export const SLOT_COUNT = 4;
 // any one AudioSession from the live `sessions` list.
 export const MIXER_MASTER_SESSION_ID = 0xfffffffe;
 export const MACRO_TRIGGER_COUNT = MACRO_TRIGGER_LABELS.length;
+
+// Index into MACRO_TRIGGER_LABELS/state.macros for a knob's rotate-right/
+// rotate-left binding -- mirrors MACRO_TRIGGER_ENCODER_n_ROTATE_PLUS/MINUS's
+// layout in macro_map.h (appended after the 12 switch/button triggers, 2
+// per encoder).
+export function encoderRotatePlusTrigger(index: number): number {
+  return 12 + index * 2;
+}
+export function encoderRotateMinusTrigger(index: number): number {
+  return 13 + index * 2;
+}
 // Mirrors MACRO_KEYSTROKE_MAX_STEPS in include/core/macro_map.h.
 export const MACRO_KEYSTROKE_MAX_STEPS = 64;
 // Mirrors MACRO_BUTTON_COUNT in shared/protocol.h -- the 8 switches only,
@@ -70,6 +87,7 @@ export const GuiComponent = {
   VuMeters: 0,
   Waveform: 1,
   MacroGrid: 2,
+  ChannelRows: 3,
 } as const;
 export type GuiComponent = (typeof GuiComponent)[keyof typeof GuiComponent];
 
@@ -77,13 +95,53 @@ export const GUI_COMPONENT_LABELS: Record<GuiComponent, string> = {
   [GuiComponent.VuMeters]: "VU Meters",
   [GuiComponent.Waveform]: "Waveform",
   [GuiComponent.MacroGrid]: "Macro Grid",
+  [GuiComponent.ChannelRows]: "Channel Rows",
 };
 
 // Mirrors GUI_COMPONENT_COUNT in shared/protocol.h.
-export const GUI_COMPONENT_COUNT = 3;
+export const GUI_COMPONENT_COUNT = 4;
 // Mirrors GUI_COMPONENT_NONE in shared/protocol.h -- a guiLayout slot
 // holding this id is disabled.
 export const GUI_COMPONENT_NONE = 0xff;
+
+// Mirrors the TOPBAR_ITEM_* enum in shared/protocol.h: what each of the
+// topbar's 3 fixed slots can independently show, via DeviceSettings.topbarItems.
+export const TopbarItem = {
+  Connection: 0,
+  AnyMuted: 1,
+  ClipWarning: 2,
+  ActiveChannels: 3,
+  OutputLevel: 4,
+  LoudestChannel: 5,
+  Uptime: 6,
+  FineStep: 7,
+  MasterVolume: 8,
+  ProfileName: 9,
+  SessionCount: 10,
+  Clock: 11,
+} as const;
+export type TopbarItem = (typeof TopbarItem)[keyof typeof TopbarItem];
+
+export const TOPBAR_ITEM_LABELS: Record<TopbarItem, string> = {
+  [TopbarItem.Connection]: "Connection status",
+  [TopbarItem.AnyMuted]: "Any-muted indicator",
+  [TopbarItem.ClipWarning]: "Clip warning",
+  [TopbarItem.ActiveChannels]: "Active channel count",
+  [TopbarItem.OutputLevel]: "Combined output level",
+  [TopbarItem.LoudestChannel]: "Loudest channel",
+  [TopbarItem.Uptime]: "Device uptime",
+  [TopbarItem.FineStep]: "Fine-step mode indicator",
+  [TopbarItem.MasterVolume]: "Master volume/mute",
+  [TopbarItem.ProfileName]: "Active profile name",
+  [TopbarItem.SessionCount]: "Known session count",
+  [TopbarItem.Clock]: "Clock",
+};
+
+// Mirrors TOPBAR_SLOT_COUNT in shared/protocol.h.
+export const TOPBAR_SLOT_COUNT = 3;
+// Mirrors TOPBAR_ITEM_NONE in shared/protocol.h -- a topbarItems slot
+// holding this id is disabled.
+export const TOPBAR_ITEM_NONE = 0xff;
 
 export interface AudioSession {
   id: number;
@@ -119,6 +177,9 @@ export interface DeviceSettings {
   guiLayout: number[];
   // Length MACRO_BUTTON_COUNT, index i is Switch (i+1)'s on-device label.
   macroLabels: string[];
+  // Length TOPBAR_SLOT_COUNT, TopbarItem ids for the topbar's 3 fixed
+  // positions; a slot holding TOPBAR_ITEM_NONE disables that position.
+  topbarItems: number[];
 }
 
 export interface ProfileSummary {
@@ -159,6 +220,7 @@ export const EMPTY_STATE: TinypadState = {
   deviceSettings: {
     guiLayout: [GuiComponent.VuMeters, GuiComponent.Waveform, GuiComponent.MacroGrid],
     macroLabels: Array(MACRO_BUTTON_COUNT).fill(""),
+    topbarItems: Array(TOPBAR_SLOT_COUNT).fill(TOPBAR_ITEM_NONE),
   },
   simulationEnabled: false,
   profiles: [],

@@ -2,8 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { CircleDot, Keyboard, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { keyEventToStep } from "@/lib/keystrokeCapture";
-import { parseKeystrokeSequence, stringifyKeystrokeSequence } from "@/lib/keystrokeParser";
+import {
+  formatKeystrokeStepParts,
+  parseKeystrokeSequence,
+  stringifyKeystrokeSequence,
+} from "@/lib/keystrokeParser";
 import { MACRO_KEYSTROKE_MAX_STEPS, type KeystrokeStep } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -170,18 +175,19 @@ function StepChips({ steps, emptyHint, onRemove }: StepChipsProps) {
   }
 
   return (
-    <div className="flex flex-wrap gap-1">
+    <div className="flex flex-wrap items-center gap-1.5">
       {steps.map((step, i) => (
-        <span
-          key={i}
-          className="flex items-center gap-0.5 rounded bg-secondary py-0.5 pr-0.5 pl-1.5 font-mono text-[10px] text-secondary-foreground"
-        >
-          {stringifyKeystrokeSequence([step])}
+        <span key={i} className="flex items-center gap-0.5">
+          <KbdGroup>
+            {formatKeystrokeStepParts(step).map((part, j) => (
+              <Kbd key={j}>{part}</Kbd>
+            ))}
+          </KbdGroup>
           {onRemove && (
             <button
               type="button"
               onClick={() => onRemove(i)}
-              className="rounded-sm p-0.5 hover:bg-destructive/20 hover:text-destructive"
+              className="rounded-sm p-0.5 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
               title="Remove this step"
             >
               <X className="size-2.5" />

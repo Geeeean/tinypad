@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MacroModifier } from "@/types";
 import {
+  formatKeystrokeStepParts,
   parseKeystrokeSequence,
   parseKeystrokeToken,
   stringifyKeystrokeSequence,
@@ -125,5 +126,35 @@ describe("stringifyKeystrokeSequence", () => {
     const { steps } = parseKeystrokeSequence(original);
     const text = stringifyKeystrokeSequence(steps);
     expect(parseKeystrokeSequence(text).steps).toEqual(steps);
+  });
+
+  it("spells a shifted punctuation glyph as shift+<base key>, not the glyph itself", () => {
+    // The grammar can't accept "+" as a key token ("+" is the
+    // modifier-joining character), so the editable text form must stay
+    // parseable -- see formatKeystrokeStepParts below for the display-only
+    // form that renders the glyph directly.
+    expect(stringifyKeystrokeSequence([{ modifiers: MacroModifier.Shift, key: 65 }])).toBe(
+      "shift+=",
+    );
+  });
+});
+
+describe("formatKeystrokeStepParts", () => {
+  it("renders a shifted punctuation glyph directly instead of shift+<base key>", () => {
+    expect(formatKeystrokeStepParts({ modifiers: MacroModifier.Shift, key: 65 })).toEqual(["+"]); // shift+= -> +
+    expect(formatKeystrokeStepParts({ modifiers: MacroModifier.Shift, key: 64 })).toEqual(["_"]); // shift+- -> _
+  });
+
+  it("keeps other modifiers alongside the glyph, dropping only shift's own name", () => {
+    expect(
+      formatKeystrokeStepParts({ modifiers: MacroModifier.Meta | MacroModifier.Shift, key: 65 }),
+    ).toEqual(["cmd", "+"]);
+  });
+
+  it("falls back to the plain modifier/key parts for a non-punctuation or unshifted step", () => {
+    expect(formatKeystrokeStepParts({ modifiers: 0, key: 7 })).toEqual(["g"]);
+    expect(
+      formatKeystrokeStepParts({ modifiers: MacroModifier.Meta | MacroModifier.Shift, key: 22 }),
+    ).toEqual(["shift", "cmd", "v"]);
   });
 });

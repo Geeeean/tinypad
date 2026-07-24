@@ -1,7 +1,8 @@
 import { DisplayPanel } from "@/components/device/DisplayPanel";
 import { KeyButton } from "@/components/device/KeyButton";
 import { KnobButton } from "@/components/device/KnobButton";
-import type { TinypadState } from "@/types";
+import { TopbarPanel } from "@/components/device/TopbarPanel";
+import { encoderRotateMinusTrigger, encoderRotatePlusTrigger, type TinypadState } from "@/types";
 
 interface DeviceLayoutProps {
   state: TinypadState;
@@ -14,6 +15,7 @@ export function DeviceLayout({ state }: DeviceLayoutProps) {
   return (
     <div className="rounded-2xl border bg-card p-6 shadow-sm">
       <DisplayPanel settings={state.deviceSettings} />
+      <TopbarPanel settings={state.deviceSettings} />
 
       <div className="mt-6 flex justify-center gap-6">
         {state.slots.map((slot, i) => (
@@ -23,6 +25,8 @@ export function DeviceLayout({ state }: DeviceLayoutProps) {
             slot={slot}
             sessions={state.sessions}
             buttonAction={state.macros[8 + i]}
+            rotatePlusAction={state.macros[encoderRotatePlusTrigger(i)]}
+            rotateMinusAction={state.macros[encoderRotateMinusTrigger(i)]}
           />
         ))}
       </div>

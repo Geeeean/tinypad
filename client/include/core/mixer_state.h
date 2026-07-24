@@ -22,6 +22,15 @@
 // master output isn't one of the sessions a backend enumerates.
 #define MIXER_MASTER_SESSION_ID 0xFFFFFFFEu
 
+// Display name a master-bound slot's mixer_slot_t.name is always set to
+// (mixer_state_assign_slot()'s master branch, and every backend's own
+// get_master()). profile_store.c checks a saved slot_assignments row
+// against this to reconnect straight to MIXER_MASTER_SESSION_ID on load,
+// instead of the generic name-based pending-reconnect path used for real
+// app sessions (which never resolves for "Master", since it's never one of
+// audio_backend's enumerated sessions).
+#define MIXER_MASTER_SESSION_NAME "Master"
+
 typedef struct {
     bool assigned;
     uint32_t session_id;
@@ -54,6 +63,10 @@ void mixer_state_poll(mixer_state_t *state);
 // picker). Returns the number copied.
 size_t mixer_state_list_sessions(mixer_state_t *state, audio_session_t *out, size_t max_out);
 
+// Total number of audio sessions currently known, whether or not any are
+// assigned to a slot (for the topbar's session-count item).
+size_t mixer_state_get_session_count(mixer_state_t *state);
+
 bool mixer_state_assign_slot(mixer_state_t *state, int slot, uint32_t session_id);
 bool mixer_state_clear_slot(mixer_state_t *state, int slot);
 bool mixer_state_get_slot(mixer_state_t *state, int slot, mixer_slot_t *out);
@@ -73,6 +86,10 @@ bool mixer_state_adjust_slot_volume(mixer_state_t *state, int slot, int delta_pe
 bool mixer_state_set_slot_volume(mixer_state_t *state, int slot, uint8_t volume_percent);
 bool mixer_state_toggle_slot_mute(mixer_state_t *state, int slot);
 
-// Snapshots current slot state into wire packets.
-void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out);
+// Snapshots current slot state into wire packets. clock_hour/clock_minute
+// are forwarded as-is into the packet (CLOCK_UNKNOWN if the caller has no
+// clock available) -- mixer_state doesn't source these itself, just carries
+// them through to the single build+checksum call site.
+void mixer_state_build_levels_packet(mixer_state_t *state, levels_packet *out,
+                                     uint8_t clock_hour, uint8_t clock_minute);
 void mixer_state_build_metadata_packet(mixer_state_t *state, metadata_packet *out);

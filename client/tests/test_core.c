@@ -44,14 +44,19 @@ static void test_protocol_levels_roundtrip(void)
         {.volume = 70, .left = 80, .right = 90},
         {.volume = 100, .left = 0, .right = 1},
     };
+    channel_level master = {.volume = 55, .left = 33, .right = 33, .muted = 0};
     levels_packet built;
-    protocol_build_levels_packet(&built, channels);
+    protocol_build_levels_packet(&built, channels, &master, 7, 14, 42);
 
     levels_packet parsed;
     CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_LEVELS, (const uint8_t *)&built, sizeof(built), &parsed));
     CHECK(parsed.hdr.header == PROTOCOL_START_BYTE);
     CHECK(parsed.hdr.type == PROTOCOL_PACKET_LEVELS);
     CHECK(memcmp(parsed.channels, channels, sizeof(channels)) == 0);
+    CHECK(memcmp(&parsed.master, &master, sizeof(master)) == 0);
+    CHECK(parsed.session_count == 7);
+    CHECK(parsed.clock_hour == 14);
+    CHECK(parsed.clock_minute == 42);
 }
 
 static void test_protocol_metadata_roundtrip(void)
@@ -72,10 +77,14 @@ static void test_protocol_device_config_roundtrip(void)
     strcpy(labels[0], "MUTE");
     strcpy(labels[7], "PLAY");
     uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
-                                               GUI_COMPONENT_MACRO_GRID};
+                                               GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE};
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_CONNECTION, TOPBAR_ITEM_MASTER_VOLUME,
+                                               TOPBAR_ITEM_NONE};
+    char profile_name[PROFILE_NAME_WIRE_LEN] = {0};
+    strcpy(profile_name, "Streaming");
 
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, gui_layout);
+    protocol_build_device_config_packet(&built, labels, gui_layout, topbar_items, profile_name);
 
     device_config_packet parsed;
     CHECK(PROTOCOL_PARSE(PROTOCOL_PACKET_DEVICE_CONFIG, (const uint8_t *)&built, sizeof(built),
@@ -84,15 +93,19 @@ static void test_protocol_device_config_roundtrip(void)
     CHECK(strcmp(parsed.macro_labels[7], "PLAY") == 0);
     CHECK(parsed.macro_labels[1][0] == '\0');
     CHECK(memcmp(parsed.gui_layout, gui_layout, sizeof(gui_layout)) == 0);
+    CHECK(memcmp(parsed.topbar_items, topbar_items, sizeof(topbar_items)) == 0);
+    CHECK(strcmp(parsed.active_profile_name, "Streaming") == 0);
 }
 
 static void test_protocol_checksum_rejects_corruption(void)
 {
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN] = {0};
     uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
-                                               GUI_COMPONENT_MACRO_GRID};
+                                               GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE};
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_NONE, TOPBAR_ITEM_NONE, TOPBAR_ITEM_NONE};
+    char profile_name[PROFILE_NAME_WIRE_LEN] = {0};
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, gui_layout);
+    protocol_build_device_config_packet(&built, labels, gui_layout, topbar_items, profile_name);
 
     uint8_t raw[sizeof(built)];
     memcpy(raw, &built, sizeof(raw));
@@ -107,9 +120,11 @@ static void test_protocol_reader_feed_roundtrip(void)
     char labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN] = {0};
     strcpy(labels[2], "SW3");
     uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE,
-                                               GUI_COMPONENT_NONE};
+                                               GUI_COMPONENT_NONE, GUI_COMPONENT_NONE};
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_NONE, TOPBAR_ITEM_NONE, TOPBAR_ITEM_NONE};
+    char profile_name[PROFILE_NAME_WIRE_LEN] = {0};
     device_config_packet built;
-    protocol_build_device_config_packet(&built, labels, gui_layout);
+    protocol_build_device_config_packet(&built, labels, gui_layout, topbar_items, profile_name);
 
     protocol_reader_t reader;
     protocol_reader_init(&reader);
@@ -169,18 +184,38 @@ static void test_protocol_reader_resyncs_after_bad_checksum(void)
 static void test_protocol_normalize_gui_layout_clears_bad_entries(void)
 {
     uint8_t layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_MACRO_GRID,
-                                           0x7F};
+                                           0x7F, GUI_COMPONENT_NONE};
     protocol_normalize_gui_layout(layout);
     CHECK(layout[0] == GUI_COMPONENT_MACRO_GRID); // first occurrence kept
     CHECK(layout[1] == GUI_COMPONENT_NONE);       // duplicate cleared
     CHECK(layout[2] == GUI_COMPONENT_NONE);       // out-of-range cleared
+    CHECK(layout[3] == GUI_COMPONENT_NONE);
 
     uint8_t untouched[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_NONE, GUI_COMPONENT_WAVEFORM,
-                                              GUI_COMPONENT_VU_METERS};
+                                              GUI_COMPONENT_VU_METERS, GUI_COMPONENT_CHANNEL_ROWS};
     protocol_normalize_gui_layout(untouched);
     CHECK(untouched[0] == GUI_COMPONENT_NONE);
     CHECK(untouched[1] == GUI_COMPONENT_WAVEFORM);
     CHECK(untouched[2] == GUI_COMPONENT_VU_METERS);
+    CHECK(untouched[3] == GUI_COMPONENT_CHANNEL_ROWS);
+}
+
+static void test_protocol_normalize_topbar_items_clears_out_of_range_only(void)
+{
+    // Unlike gui_layout, duplicates across slots are allowed -- the 3
+    // positions are independent, not a reorderable stack.
+    uint8_t items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_MASTER_VOLUME, TOPBAR_ITEM_MASTER_VOLUME, 0x7F};
+    protocol_normalize_topbar_items(items);
+    CHECK(items[0] == TOPBAR_ITEM_MASTER_VOLUME);
+    CHECK(items[1] == TOPBAR_ITEM_MASTER_VOLUME); // duplicate NOT cleared
+    CHECK(items[2] == TOPBAR_ITEM_NONE);          // out-of-range cleared
+
+    uint8_t untouched[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_NONE, TOPBAR_ITEM_CLOCK,
+                                            TOPBAR_ITEM_CONNECTION};
+    protocol_normalize_topbar_items(untouched);
+    CHECK(untouched[0] == TOPBAR_ITEM_NONE);
+    CHECK(untouched[1] == TOPBAR_ITEM_CLOCK);
+    CHECK(untouched[2] == TOPBAR_ITEM_CONNECTION);
 }
 
 // --- device_discovery.c -------------------------------------------------------
@@ -264,6 +299,14 @@ static void test_macro_map_defaults(void)
         CHECK(action.type == MACRO_ACTION_NONE);
     }
 
+    // Encoder rotation triggers default unbound too -- device_link.c falls
+    // back to its normal volume-adjust behavior for any direction with no
+    // macro bound.
+    for (int i = MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS; i < MACRO_TRIGGER_COUNT; i++) {
+        macro_action_t action = macro_map_get(map, (macro_trigger_t)i);
+        CHECK(action.type == MACRO_ACTION_NONE);
+    }
+
     macro_map_destroy(map);
 }
 
@@ -281,6 +324,29 @@ static void test_macro_map_set_get_roundtrip(void)
     CHECK(got.step_count == 1);
     CHECK(got.steps[0].key == 5);
     CHECK(got.steps[0].modifiers == 0x1);
+
+    macro_map_destroy(map);
+}
+
+static void test_macro_map_rotate_trigger_roundtrip(void)
+{
+    macro_map_t *map = macro_map_create();
+
+    macro_action_t action = {.type = MACRO_ACTION_SEND_KEYSTROKE, .target_slot = -1};
+    action.steps[0] = (macro_keystroke_step_t){.modifiers = 0x4, .key = 45}; // e.g. Shift+Right
+    action.step_count = 1;
+    macro_map_set(map, MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS, action);
+
+    macro_action_t got = macro_map_get(map, MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS);
+    CHECK(got.type == MACRO_ACTION_SEND_KEYSTROKE);
+    CHECK(got.step_count == 1);
+    CHECK(got.steps[0].key == 45);
+    CHECK(got.steps[0].modifiers == 0x4);
+
+    // The opposite direction on the same encoder is unaffected -- each of
+    // the 8 rotate triggers is independently bindable.
+    macro_action_t other = macro_map_get(map, MACRO_TRIGGER_ENCODER_1_ROTATE_MINUS);
+    CHECK(other.type == MACRO_ACTION_NONE);
 
     macro_map_destroy(map);
 }
@@ -324,7 +390,7 @@ static void test_device_settings_defaults(void)
     uint8_t gui_layout[GUI_COMPONENT_COUNT];
     device_settings_get_gui_layout(settings, gui_layout);
     uint8_t expected[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_VU_METERS, GUI_COMPONENT_WAVEFORM,
-                                             GUI_COMPONENT_MACRO_GRID};
+                                             GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE};
     CHECK(memcmp(gui_layout, expected, sizeof(expected)) == 0);
 
     char label[MACRO_LABEL_LEN];
@@ -371,8 +437,12 @@ static void test_device_settings_build_packet(void)
     device_settings_t *settings = device_settings_create();
     device_settings_set_macro_label(settings, 0, "MUTE");
     uint8_t gui_layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_VU_METERS,
-                                               GUI_COMPONENT_NONE};
+                                               GUI_COMPONENT_NONE, GUI_COMPONENT_NONE};
     device_settings_set_gui_layout(settings, gui_layout);
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_CONNECTION, TOPBAR_ITEM_CLOCK,
+                                               TOPBAR_ITEM_NONE};
+    device_settings_set_topbar_items(settings, topbar_items);
+    device_settings_set_profile_name(settings, "Gaming");
 
     device_config_packet built;
     device_settings_build_packet(settings, &built);
@@ -382,6 +452,24 @@ static void test_device_settings_build_packet(void)
                          &parsed));
     CHECK(strcmp(parsed.macro_labels[0], "MUTE") == 0);
     CHECK(memcmp(parsed.gui_layout, gui_layout, sizeof(gui_layout)) == 0);
+    CHECK(memcmp(parsed.topbar_items, topbar_items, sizeof(topbar_items)) == 0);
+    CHECK(strcmp(parsed.active_profile_name, "Gaming") == 0);
+
+    device_settings_destroy(settings);
+}
+
+static void test_device_settings_topbar_items_roundtrip_and_normalizes(void)
+{
+    device_settings_t *settings = device_settings_create();
+
+    uint8_t items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_MASTER_VOLUME, TOPBAR_ITEM_MASTER_VOLUME, 0x7F};
+    device_settings_set_topbar_items(settings, items);
+
+    uint8_t out[TOPBAR_SLOT_COUNT];
+    device_settings_get_topbar_items(settings, out);
+    CHECK(out[0] == TOPBAR_ITEM_MASTER_VOLUME);
+    CHECK(out[1] == TOPBAR_ITEM_MASTER_VOLUME); // duplicates allowed, unlike gui_layout
+    CHECK(out[2] == TOPBAR_ITEM_NONE);          // out-of-range cleared
 
     device_settings_destroy(settings);
 }
@@ -654,14 +742,33 @@ static void test_mixer_state_poll_syncs_master_into_slot(void)
     mixer_state_assign_slot(state, 0, MIXER_MASTER_SESSION_ID);
 
     g_fake.master_volume = 0.4f;
-    g_fake.master_peak = 0.6f;
-    g_fake.master_muted = true;
+    g_fake.master_muted = false;
     mixer_state_poll(state);
 
     mixer_slot_t slot;
     mixer_state_get_slot(state, 0, &slot);
     CHECK(slot.volume == 40);
-    CHECK(slot.peak == 60);
+    CHECK(slot.peak == 0); // no contributing sessions yet
+
+    // Master's own displayed peak is *derived* from every known session's
+    // own (already gain-scaled) peak -- not trusted from the backend's
+    // separate get_master() peak reading (fake_get_master()'s master_peak is
+    // deliberately left unset/unused by this test) -- see
+    // test_mixer_state_non_master_peak_scales_with_master_volume for the
+    // "matches an individual session exactly" case this guarantees.
+    audio_session_t s1 = make_session(1, "Discord", 1.0f, false);
+    g_fake.on_added(&s1, g_fake.user_data);
+    audio_session_t updated = s1;
+    updated.peak = 0.5f;
+    g_fake.on_updated(&updated, g_fake.user_data);
+    mixer_state_poll(state);
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.peak == 20); // 0.5 * 0.4 master volume
+
+    g_fake.master_muted = true;
+    mixer_state_poll(state);
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.peak == 0);
     CHECK(slot.muted == true);
 
     mixer_state_destroy(state);
@@ -719,6 +826,88 @@ static void test_mixer_state_toggle_mute_routes_to_master(void)
     mixer_state_destroy(state);
 }
 
+// A non-master slot's own peak is a raw, pre-master-attenuation reading; the
+// system's master volume/mute is tracked every poll (see
+// test_mixer_state_poll_syncs_master_into_slot) even when no slot is
+// actually bound to it, and applied on top so the slot's *displayed* peak
+// -- both to the desktop UI (mixer_state_get_slot) and the firmware
+// (mixer_state_build_levels_packet) -- reflects what you'd actually hear.
+static void test_mixer_state_non_master_peak_scales_with_master_volume(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    audio_session_t s1 = make_session(1, "Discord", 1.0f, false);
+    g_fake.on_added(&s1, g_fake.user_data);
+    mixer_state_assign_slot(state, 0, 1);
+
+    audio_session_t updated = s1;
+    updated.peak = 0.5f; // 50 on the wire scale
+    g_fake.on_updated(&updated, g_fake.user_data);
+
+    mixer_slot_t slot;
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.peak == 50); // no master polled yet -- default is no attenuation
+
+    // Master at 20%, not assigned to any slot -- still attenuates this slot,
+    // since mixer_state_poll() tracks the system's master volume
+    // unconditionally, not just when a knob shows it.
+    g_fake.master_volume = 0.2f;
+    mixer_state_poll(state);
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.peak == 10); // 50 * 0.2
+
+    levels_packet levels;
+    mixer_state_build_levels_packet(state, &levels, CLOCK_UNKNOWN, CLOCK_UNKNOWN);
+    CHECK(levels.channels[0].left == 10);
+    CHECK(levels.channels[0].right == 10);
+
+    // Muting master (system-wide) zeroes it too, even though this slot's
+    // own mute is untouched.
+    g_fake.master_muted = true;
+    mixer_state_poll(state);
+    mixer_state_get_slot(state, 0, &slot);
+    CHECK(slot.peak == 0);
+    CHECK(slot.muted == false); // this slot's own mute, unaffected
+
+    mixer_state_destroy(state);
+}
+
+// The concrete invariant a user actually cares about: with only one app
+// (say Spotify) making sound, its own slot and a slot assigned to Master
+// should read exactly the same peak, at any master volume -- not just
+// proportional, but equal, since Master's derivation reduces to exactly
+// this one contributing session's own peak (see derived_master_peak_locked).
+static void test_mixer_state_single_session_matches_master_slot(void)
+{
+    mixer_state_t *state = mixer_state_create(&g_fake_vtable);
+
+    audio_session_t s1 = make_session(1, "Spotify", 1.0f, false);
+    g_fake.on_added(&s1, g_fake.user_data);
+    mixer_state_assign_slot(state, 0, 1); // slot 0 -> Spotify
+    mixer_state_assign_slot(state, 1, MIXER_MASTER_SESSION_ID); // slot 1 -> Master
+
+    audio_session_t updated = s1;
+    updated.peak = 0.73f; // arbitrary, non-round value
+    g_fake.on_updated(&updated, g_fake.user_data);
+
+    g_fake.master_volume = 0.35f;
+    mixer_state_poll(state);
+
+    mixer_slot_t spotify_slot, master_slot;
+    mixer_state_get_slot(state, 0, &spotify_slot);
+    mixer_state_get_slot(state, 1, &master_slot);
+    CHECK(spotify_slot.peak == master_slot.peak);
+
+    // Still true at a different master volume.
+    g_fake.master_volume = 0.9f;
+    mixer_state_poll(state);
+    mixer_state_get_slot(state, 0, &spotify_slot);
+    mixer_state_get_slot(state, 1, &master_slot);
+    CHECK(spotify_slot.peak == master_slot.peak);
+
+    mixer_state_destroy(state);
+}
+
 static void test_mixer_state_build_packets_reflect_assignment(void)
 {
     mixer_state_t *state = mixer_state_create(&g_fake_vtable);
@@ -729,7 +918,7 @@ static void test_mixer_state_build_packets_reflect_assignment(void)
     mixer_state_set_slot_volume(state, 0, 50);
 
     levels_packet levels;
-    mixer_state_build_levels_packet(state, &levels);
+    mixer_state_build_levels_packet(state, &levels, CLOCK_UNKNOWN, CLOCK_UNKNOWN);
     CHECK(levels.channels[0].volume == 50);
     CHECK(levels.channels[1].volume == 0); // unassigned slot
 
@@ -949,7 +1138,7 @@ static void test_mixer_state_with_simulated_backend_auto_assigns(void)
     for (int tick = 0; tick < 120; tick++) {
         mixer_state_poll(state);
         levels_packet levels;
-        mixer_state_build_levels_packet(state, &levels);
+        mixer_state_build_levels_packet(state, &levels, CLOCK_UNKNOWN, CLOCK_UNKNOWN);
         for (int i = 0; i < MIXER_CHANNELS; i++) {
             if (levels.channels[i].left > 0) {
                 saw_nonzero_peak = true;
@@ -989,8 +1178,11 @@ static void test_profile_store_save_as_and_load_round_trip(void)
 
     device_settings_set_macro_label(settings, 3, "MUTE ALL");
     uint8_t layout[GUI_COMPONENT_COUNT] = {GUI_COMPONENT_MACRO_GRID, GUI_COMPONENT_NONE,
-                                           GUI_COMPONENT_NONE};
+                                           GUI_COMPONENT_NONE, GUI_COMPONENT_NONE};
     device_settings_set_gui_layout(settings, layout);
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT] = {TOPBAR_ITEM_CONNECTION, TOPBAR_ITEM_MASTER_VOLUME,
+                                               TOPBAR_ITEM_NONE};
+    device_settings_set_topbar_items(settings, topbar_items);
     macro_action_t action = {.type = MACRO_ACTION_TOGGLE_MUTE_SLOT, .target_slot = 2};
     macro_map_set(macros, MACRO_TRIGGER_SWITCH_5, action);
 
@@ -1016,6 +1208,19 @@ static void test_profile_store_save_as_and_load_round_trip(void)
     device_settings_get_gui_layout(settings2, got_layout);
     CHECK(got_layout[0] == GUI_COMPONENT_MACRO_GRID);
     CHECK(got_layout[1] == GUI_COMPONENT_NONE);
+
+    uint8_t got_topbar[TOPBAR_SLOT_COUNT];
+    device_settings_get_topbar_items(settings2, got_topbar);
+    CHECK(got_topbar[0] == TOPBAR_ITEM_CONNECTION);
+    CHECK(got_topbar[1] == TOPBAR_ITEM_MASTER_VOLUME);
+    CHECK(got_topbar[2] == TOPBAR_ITEM_NONE);
+
+    // profile_store_load() also reads the profile's own name back into
+    // settings, so the topbar's PROFILE_NAME item reaches the wire without a
+    // separate call.
+    char got_name[PROFILE_NAME_WIRE_LEN];
+    device_settings_get_profile_name(settings2, got_name, sizeof(got_name));
+    CHECK(strcmp(got_name, "Streaming") == 0);
 
     macro_action_t got = macro_map_get(macros2, MACRO_TRIGGER_SWITCH_5);
     CHECK(got.type == MACRO_ACTION_TOGGLE_MUTE_SLOT);
@@ -1208,6 +1413,42 @@ static void test_profile_store_persists_and_reconnects_slot_assignment(void)
     profile_store_close(store);
 }
 
+// Master is never one of audio_backend's enumerated sessions (see
+// mixer_state.c), so a saved Master assignment must reconnect immediately
+// on load -- unlike a real app's name-based pending-reconnect, it can't
+// wait for an on_added event that will never fire.
+static void test_profile_store_persists_and_reconnects_master_assignment(void)
+{
+    profile_store_t *store = profile_store_open(":memory:");
+    macro_map_t *macros = macro_map_create();
+    device_settings_t *settings = device_settings_create();
+    mixer_state_t *mixer = mixer_state_create(&g_fake_vtable);
+
+    CHECK(mixer_state_assign_slot(mixer, 2, MIXER_MASTER_SESSION_ID));
+
+    int64_t new_id;
+    CHECK(profile_store_save_as(store, "WithMaster", macros, settings, mixer, &new_id));
+
+    macro_map_t *macros2 = macro_map_create();
+    device_settings_t *settings2 = device_settings_create();
+    mixer_state_t *mixer2 = mixer_state_create(&g_fake_vtable);
+    CHECK(profile_store_load(store, new_id, macros2, settings2, mixer2));
+
+    mixer_slot_t slot;
+    CHECK(mixer_state_get_slot(mixer2, 2, &slot));
+    CHECK(slot.assigned);
+    CHECK(slot.session_id == MIXER_MASTER_SESSION_ID);
+    CHECK(strcmp(slot.name, MIXER_MASTER_SESSION_NAME) == 0);
+
+    mixer_state_destroy(mixer);
+    mixer_state_destroy(mixer2);
+    macro_map_destroy(macros);
+    macro_map_destroy(macros2);
+    device_settings_destroy(settings);
+    device_settings_destroy(settings2);
+    profile_store_close(store);
+}
+
 int main(void)
 {
     RUN_TEST(test_protocol_levels_roundtrip);
@@ -1217,6 +1458,7 @@ int main(void)
     RUN_TEST(test_protocol_reader_feed_roundtrip);
     RUN_TEST(test_protocol_reader_resyncs_after_bad_checksum);
     RUN_TEST(test_protocol_normalize_gui_layout_clears_bad_entries);
+    RUN_TEST(test_protocol_normalize_topbar_items_clears_out_of_range_only);
 
     RUN_TEST(test_device_discovery_matches_by_vendor_and_product_string);
     RUN_TEST(test_device_discovery_falls_back_to_pid_without_product_string);
@@ -1225,6 +1467,7 @@ int main(void)
 
     RUN_TEST(test_macro_map_defaults);
     RUN_TEST(test_macro_map_set_get_roundtrip);
+    RUN_TEST(test_macro_map_rotate_trigger_roundtrip);
     RUN_TEST(test_macro_map_out_of_range_is_noop);
     RUN_TEST(test_macro_trigger_from_command);
 
@@ -1232,6 +1475,7 @@ int main(void)
     RUN_TEST(test_device_settings_label_roundtrip_and_truncation);
     RUN_TEST(test_device_settings_out_of_range_is_noop);
     RUN_TEST(test_device_settings_build_packet);
+    RUN_TEST(test_device_settings_topbar_items_roundtrip_and_normalizes);
 
     RUN_TEST(test_mixer_state_session_list_tracks_added_and_removed);
     RUN_TEST(test_mixer_state_assign_and_clear_slot);
@@ -1244,6 +1488,8 @@ int main(void)
     RUN_TEST(test_mixer_state_poll_ignores_master_when_unsupported);
     RUN_TEST(test_mixer_state_set_volume_routes_to_master);
     RUN_TEST(test_mixer_state_toggle_mute_routes_to_master);
+    RUN_TEST(test_mixer_state_non_master_peak_scales_with_master_volume);
+    RUN_TEST(test_mixer_state_single_session_matches_master_slot);
     RUN_TEST(test_mixer_state_build_packets_reflect_assignment);
     RUN_TEST(test_mixer_state_set_backend_clears_sessions_and_slots);
     RUN_TEST(test_mixer_state_pending_assignment_immediate);
@@ -1261,6 +1507,7 @@ int main(void)
     RUN_TEST(test_profile_store_delete_refuses_last_and_cascades);
     RUN_TEST(test_profile_store_delete_active_falls_back);
     RUN_TEST(test_profile_store_persists_and_reconnects_slot_assignment);
+    RUN_TEST(test_profile_store_persists_and_reconnects_master_assignment);
 
     if (g_failures == 0) {
         printf("\nAll tests passed.\n");

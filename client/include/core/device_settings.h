@@ -30,5 +30,19 @@ void device_settings_set_gui_layout(device_settings_t *settings,
 void device_settings_get_gui_layout(device_settings_t *settings,
                                     uint8_t out[GUI_COMPONENT_COUNT]);
 
+// items: TOPBAR_SLOT_COUNT ids, one per fixed topbar position;
+// TOPBAR_ITEM_NONE disables that slot. Normalized (out-of-range ids cleared
+// to TOPBAR_ITEM_NONE; duplicates are allowed, unlike gui_layout) on every
+// set and again when the packet is built.
+void device_settings_set_topbar_items(device_settings_t *settings,
+                                      const uint8_t items[TOPBAR_SLOT_COUNT]);
+void device_settings_get_topbar_items(device_settings_t *settings,
+                                      uint8_t out[TOPBAR_SLOT_COUNT]);
+
+// The active profile's display name, shown by the topbar's PROFILE_NAME
+// item. Truncated to PROFILE_NAME_WIRE_LEN-1 chars on set.
+void device_settings_set_profile_name(device_settings_t *settings, const char *name);
+void device_settings_get_profile_name(device_settings_t *settings, char *out, size_t out_size);
+
 // Snapshots current settings into a ready-to-send packet.
 void device_settings_build_packet(device_settings_t *settings, device_config_packet *out);

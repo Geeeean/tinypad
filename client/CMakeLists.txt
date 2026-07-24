@@ -175,13 +175,17 @@ elseif(APPLE)
     # (AudioHardwareCreateProcessTap and friends live in CoreAudio;
     # AudioDeviceCreateIOProcIDWithBlock's dispatch_queue_t param and
     # CATapDescription's Foundation dependency pull in AudioToolbox/
-    # Foundation transitively, but link them explicitly for clarity).
+    # Foundation transitively, but link them explicitly for clarity). Carbon
+    # is for keyboard_macos.c's TIS/UCKeyTranslate live-layout keycode
+    # resolution -- those HIToolbox symbols aren't re-exported transitively
+    # by ApplicationServices or AppKit at link time.
     target_link_libraries(tinypad PRIVATE
         "-framework ApplicationServices"
         "-framework AppKit"
         "-framework IOKit"
         "-framework CoreAudio"
         "-framework AudioToolbox"
+        "-framework Carbon"
     )
 
     # Embeds Info.plist directly into the executable's __TEXT,__info_plist

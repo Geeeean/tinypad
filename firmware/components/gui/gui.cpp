@@ -6,6 +6,7 @@
 #include "lgfx/v1/misc/enum.hpp"
 #include "protocol.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -43,27 +44,70 @@ static constexpr int MACRO_BLOCK_H = MACRO_ROWS * MACRO_RECT_H + (MACRO_ROWS - 1
 
 static constexpr int GRAPH_H = 56;
 
-// Fixed height for a component, or -1 for the one flexible component (VU
-// meters), which takes whatever vertical space the fixed-height ones leave.
-static int fixed_height_for(uint8_t component_id)
+static constexpr int CHANNEL_ROW_TEXT_H = 12;
+static constexpr int CHANNEL_ROW_TEXT_GAP = 3;
+// Also the mini vumeter's side length -- it's a square sitting at the same
+// height as the graph next to it.
+static constexpr int CHANNEL_ROW_BAR_H = 20;
+static constexpr int CHANNEL_ROW_H = CHANNEL_ROW_TEXT_H + CHANNEL_ROW_TEXT_GAP + CHANNEL_ROW_BAR_H;
+static constexpr int CHANNEL_ROW_GAP = 6;
+// History length backing each channel's scrolling time/output graph -- sized
+// to the widest the graph area could ever be (the full canvas width), so one
+// history sample always maps to one pixel column with no extra scaling.
+static constexpr int CHANNEL_GRAPH_SAMPLES = 320;
+
+// Height of the persistent topbar strip, reserved above the rest of the
+// layout whenever at least one of its 3 slots is configured.
+static constexpr int TOPBAR_HEIGHT = 18;
+
+// Counts channels with a non-empty name, i.e. currently assigned to a
+// session -- see draw_channel_rows for why an empty name is the reliable
+// "unassigned" signal.
+static int count_assigned_channels(const metadata_packet &metadata)
+{
+    int count = 0;
+    for (int c = 0; c < MIXER_CHANNELS; c++) {
+        if (strnlen(metadata.names[c], CHANNEL_NAME_LEN) > 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Fixed height for a component, -1 for the one flexible component (VU
+// meters, which takes whatever vertical space the fixed-height ones leave),
+// or 0 if the component should take no space at all this frame (channel
+// rows with nothing assigned to any knob).
+static int fixed_height_for(uint8_t component_id, int assigned_channels)
 {
     switch (component_id) {
     case GUI_COMPONENT_WAVEFORM:
         return GRAPH_H;
     case GUI_COMPONENT_MACRO_GRID:
         return MACRO_BLOCK_H;
+    case GUI_COMPONENT_CHANNEL_ROWS:
+        return assigned_channels > 0
+                   ? assigned_channels * CHANNEL_ROW_H + (assigned_channels - 1) * CHANNEL_ROW_GAP
+                   : 0;
     default:
         return -1;
     }
 }
 
-// Stacks the enabled components top to bottom. Two passes, since the
-// flexible component's height needs every other component's height first.
-GUI::Layout GUI::compute_layout(int canvas_height, const uint8_t gui_layout[GUI_COMPONENT_COUNT])
+// Stacks the enabled components top to bottom, starting at top_offset (the
+// bottom margin is still PADDING regardless of where the top starts). Two
+// passes, since the flexible component's height needs every other
+// component's height first. A component whose fixed height comes back 0
+// (channel rows with nothing assigned) is treated as fully collapsed: it
+// gets no reserved space and no section gap, rather than leaving behind the
+// margin its full size would have needed.
+GUI::Layout GUI::compute_layout(int canvas_height, int top_offset,
+                                const uint8_t gui_layout[GUI_COMPONENT_COUNT],
+                                int assigned_channels)
 {
     Layout layout{};
 
-    int enabled_count = 0;
+    int visible_count = 0;
     int fixed_total = 0;
     bool vu_enabled = false;
 
@@ -72,8 +116,11 @@ GUI::Layout GUI::compute_layout(int canvas_height, const uint8_t gui_layout[GUI_
         if (id == GUI_COMPONENT_NONE) {
             continue;
         }
-        enabled_count++;
-        int fixed_h = fixed_height_for(id);
+        int fixed_h = fixed_height_for(id, assigned_channels);
+        if (fixed_h == 0) {
+            continue; // fully collapsed -- reserves no space, no gap
+        }
+        visible_count++;
         if (fixed_h < 0) {
             vu_enabled = true;
         } else {
@@ -81,22 +128,32 @@ GUI::Layout GUI::compute_layout(int canvas_height, const uint8_t gui_layout[GUI_
         }
     }
 
-    int gaps = enabled_count > 0 ? (enabled_count - 1) * SECTION_GAP : 0;
-    int available = canvas_height - 2 * PADDING - gaps;
+    int gaps = visible_count > 0 ? (visible_count - 1) * SECTION_GAP : 0;
+    int available = canvas_height - top_offset - PADDING - gaps;
     int vu_height = vu_enabled ? std::max(0, available - fixed_total) : 0;
 
-    int y = PADDING;
+    int y = top_offset;
+    bool any_drawn = false;
     for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
         uint8_t id = gui_layout[i];
         if (id == GUI_COMPONENT_NONE) {
             continue;
         }
 
-        int fixed_h = fixed_height_for(id);
-        int h = fixed_h < 0 ? vu_height : fixed_h;
+        int fixed_h = fixed_height_for(id, assigned_channels);
+        if (fixed_h == 0) {
+            layout.bounds[id] = {y, y};
+            continue;
+        }
 
+        if (any_drawn) {
+            y += SECTION_GAP;
+        }
+
+        int h = fixed_h < 0 ? vu_height : fixed_h;
         layout.bounds[id] = {y, y + h};
-        y += h + SECTION_GAP;
+        y += h;
+        any_drawn = true;
     }
 
     return layout;
@@ -109,6 +166,16 @@ static void set_default_gui_layout(uint8_t gui_layout[GUI_COMPONENT_COUNT])
     gui_layout[0] = GUI_COMPONENT_VU_METERS;
     gui_layout[1] = GUI_COMPONENT_WAVEFORM;
     gui_layout[2] = GUI_COMPONENT_MACRO_GRID;
+    gui_layout[3] = GUI_COMPONENT_NONE; // Channel Rows: opt-in, not on by default
+}
+
+// Empty (all disabled) -- off until the host sends its own topbar
+// preference. 0 is TOPBAR_ITEM_CONNECTION, not "unset" (TOPBAR_ITEM_NONE is
+// 0xFF), so a plain zero-init isn't enough here, same reasoning as
+// gui_layout above.
+static void set_default_topbar_items(uint8_t topbar_items[TOPBAR_SLOT_COUNT])
+{
+    std::memset(topbar_items, TOPBAR_ITEM_NONE, TOPBAR_SLOT_COUNT);
 }
 
 void GUI::init(USBManager::Config config)
@@ -124,6 +191,7 @@ void GUI::init(USBManager::Config config)
     if (_config.shared_device_config != nullptr) {
         std::memset(_config.shared_device_config, 0, sizeof(device_config_packet));
         set_default_gui_layout(_config.shared_device_config->gui_layout);
+        set_default_topbar_items(_config.shared_device_config->topbar_items);
     }
 }
 
@@ -191,6 +259,7 @@ void GUI::gui_task(void *pvParameters)
         metadata_packet local_metadata = {};
         device_config_packet local_device_config = {};
         set_default_gui_layout(local_device_config.gui_layout);
+        set_default_topbar_items(local_device_config.topbar_items);
         int64_t local_last_levels_us = 0;
 
         SemaphoreHandle_t mtx = instance->_config.mutex;
@@ -221,9 +290,11 @@ void GUI::gui_task(void *pvParameters)
         // A packet fresh off the wire isn't guaranteed to be normalized, so
         // normalize the local copy before compute_layout/the draw loop use it.
         protocol_normalize_gui_layout(local_device_config.gui_layout);
+        protocol_normalize_topbar_items(local_device_config.topbar_items);
 
         if (!is_woke_up) {
             canvas.fillScreen(TFT_BLACK);
+
             int w = canvas.width();
             int h = canvas.height();
 
@@ -258,12 +329,30 @@ void GUI::gui_task(void *pvParameters)
                 output_levels[active_channels++] = level;
             }
 
-            audio_history[AUDIO_GRAPH_SAMPLES - 1] =
+            int output_level =
                 get_smoothed_output_level(output_levels, active_channels, smoothed_volume);
+            audio_history[AUDIO_GRAPH_SAMPLES - 1] = output_level;
 
-            Layout layout = compute_layout(h, local_device_config.gui_layout);
+            int topbar_h = 0;
+            for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+                if (local_device_config.topbar_items[i] != TOPBAR_ITEM_NONE) {
+                    topbar_h = TOPBAR_HEIGHT;
+                    break;
+                }
+            }
+            // With no topbar the stack starts at the usual PADDING. With one,
+            // the topbar counts as the first of the (up to) 4 stacked
+            // pieces, so the gap after it is SECTION_GAP too -- the same
+            // distance every other pair of stacked components already gets.
+            int top_offset = topbar_h > 0 ? topbar_h + SECTION_GAP : PADDING;
+
+            int assigned_channels = count_assigned_channels(local_metadata);
+            Layout layout =
+                compute_layout(h, top_offset, local_device_config.gui_layout, assigned_channels);
 
             canvas.fillScreen(TFT_BLACK);
+            instance->draw_topbar(canvas, local_levels, local_device_config, is_woke_up,
+                                  output_level);
             for (int i = 0; i < GUI_COMPONENT_COUNT; i++) {
                 uint8_t id = local_device_config.gui_layout[i];
                 switch (id) {
@@ -276,6 +365,10 @@ void GUI::gui_task(void *pvParameters)
                     break;
                 case GUI_COMPONENT_MACRO_GRID:
                     instance->draw_macro_label(canvas, layout.bounds[id], local_device_config);
+                    break;
+                case GUI_COMPONENT_CHANNEL_ROWS:
+                    instance->draw_channel_rows(canvas, layout.bounds[id], local_levels.channels,
+                                                local_metadata);
                     break;
                 default:
                     break; // GUI_COMPONENT_NONE: this slot is disabled
@@ -380,9 +473,13 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
     const int bars_top = bounds.top;
     const int bar_h_max = bars_base - bars_top;
 
-    const int seg_count = 16;
+    const int seg_count = 21; // 32 / 1.5, i.e. each segment ~1.5x the previous size
     const int seg_gap = 1;
-    const int seg_h = (bar_h_max - (seg_count - 1) * seg_gap) / seg_count;
+    // Total height across all segments with the gaps excluded -- individual
+    // segment heights are derived per-segment below (via cumulative
+    // rounding) so they fill this exactly, rather than a single fixed
+    // seg_h that leaves an integer-division leftover at one end.
+    const int segments_span = bar_h_max - (seg_count - 1) * seg_gap;
 
     const int vol_bar_h = VU_VOL_BAR_H;
 
@@ -427,9 +524,17 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
             int lit = (int)(lv * seg_count / 100.0f);
 
             for (int s = 0; s < seg_count; s++) {
-                // Anchored from bars_base (bottom) so segment size is fixed;
-                // any rounding leftover becomes a margin above the top segment.
-                int sy = bars_base - seg_h - s * (seg_h + seg_gap);
+                // s counts from the bottom (0 = first to light up). Cumulative
+                // rounding (h_before/h_after) spreads bar_h_max's remainder
+                // across individual segment heights -- some segments end up
+                // 1px taller than others -- instead of leaving a leftover gap
+                // at either end: the bottom segment's bottom edge lands
+                // exactly on bars_base and the top segment's top edge lands
+                // exactly on bars_top.
+                int64_t h_before = (int64_t)s * segments_span / seg_count;
+                int64_t h_after = (int64_t)(s + 1) * segments_span / seg_count;
+                int seg_height = (int)(h_after - h_before);
+                int sy = (int)(bars_base - h_after) - s * seg_gap;
                 int col;
                 if (s < lit) {
                     float frac = (s + 1) / (float)seg_count;
@@ -438,7 +543,7 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
                     col = track_color;
                 }
                 col = dim_if_muted((uint16_t)col, muted);
-                canvas.fillRect(bx, sy, bar_w, seg_h, col);
+                canvas.fillRect(bx, sy, bar_w, seg_height, col);
             }
         }
 
@@ -471,6 +576,144 @@ void GUI::draw_vu_meters(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
         canvas.drawString(display_name.c_str(), col_x, text_y);
         canvas.setTextDatum(lgfx::textdatum_t::top_right);
         canvas.drawString(pct_str.c_str(), col_x + col_w, text_y);
+    }
+
+    canvas.setTextDatum(lgfx::textdatum_t::top_left);
+}
+
+// 4 channels as horizontal rows (name/% on top; below that, a scrolling
+// time/output history graph -- filled, blocky columns rather than a smoothed
+// line -- with a small square vertical vumeter to its right) -- the
+// row-oriented counterpart to draw_vu_meters' column layout above, sharing
+// its color/dimming/truncation helpers.
+void GUI::draw_channel_rows(lgfx::LGFX_Sprite &canvas, const Bounds &bounds,
+                            const channel_level *channels, const metadata_packet &metadata)
+{
+    static float disp_level[MIXER_CHANNELS] = {0};
+    // Per-channel scrolling history backing the time/output graph -- shifted
+    // and appended once per frame, same pattern as the waveform component's
+    // global audio_history.
+    static uint8_t history[MIXER_CHANNELS][CHANNEL_GRAPH_SAMPLES] = {{0}};
+
+    constexpr int MINI_BOX_GAP = 6;
+    constexpr int MINI_SEG_COUNT = 5;
+    constexpr int MINI_SEG_GAP = 1;
+    constexpr int NAME_PCT_GAP = 4;
+    const int mini_box_side = CHANNEL_ROW_BAR_H; // square
+
+    const int row_left = PADDING;
+    const int row_right = canvas.width() - PADDING;
+    const int row_w = row_right - row_left;
+    const int graph_w = row_w - mini_box_side - MINI_BOX_GAP;
+
+    const int track_color = canvas.color565(40, 40, 40);
+    const int green = canvas.color565(0, 200, 80);
+    const int orange = canvas.color565(240, 140, 0);
+    const int red = canvas.color565(230, 40, 40);
+    const int graph_fill = TFT_GRAY;
+    const int text_col = TFT_GRAY;
+
+    const float up_step = 22.0f;
+    const float down_step = 8.0f;
+    const float green_max = 0.50f;
+    const float orange_max = 0.70f;
+
+    canvas.setFont(&fonts::efontCN_12);
+    canvas.setTextSize(1.0f);
+
+    int visible_row = 0;
+    for (int i = 0; i < MIXER_CHANNELS; i++) {
+        bool muted = channels[i].muted != 0;
+
+        // Live audio level (left/right peak average), not the volume/gain
+        // setting -- same ballistics (fast attack, slower decay) as the
+        // segmented bars in draw_vu_meters.
+        float target = (channels[i].left + channels[i].right) / 2.0f;
+        if (target > 100.0f)
+            target = 100.0f;
+        float &lv = disp_level[i];
+        if (target > lv)
+            lv = std::min(target, lv + up_step);
+        else
+            lv = std::max(target, lv - down_step);
+
+        std::memmove(history[i], history[i] + 1, CHANNEL_GRAPH_SAMPLES - 1);
+        history[i][CHANNEL_GRAPH_SAMPLES - 1] = (uint8_t)lv;
+
+        // An unassigned knob has no session behind it -- mixer_state always
+        // clears the name (and forces volume/left/right to 0) for a cleared
+        // slot, so an empty name is the reliable "nothing here" signal (same
+        // one draw_vu_meters/the name fallback below already rely on).
+        // Level/history above still get updated even while hidden, so the
+        // row starts from a flat baseline instead of a stale spike if the
+        // knob gets reassigned later. Skipping without advancing
+        // visible_row closes the gap rather than leaving a blank row.
+        bool unassigned = strnlen(metadata.names[i], CHANNEL_NAME_LEN) == 0;
+        if (unassigned) {
+            continue;
+        }
+
+        const int text_y = bounds.top + visible_row * (CHANNEL_ROW_H + CHANNEL_ROW_GAP);
+        const int bar_y = text_y + CHANNEL_ROW_TEXT_H + CHANNEL_ROW_TEXT_GAP;
+        const int baseline = bar_y + CHANNEL_ROW_BAR_H;
+        visible_row++;
+
+        // Time/output graph: x is time (oldest on the left, now on the
+        // right), y is output level -- drawn as solid, sharp-edged columns
+        // (one per pixel) instead of an interpolated line.
+        int this_track = dim_if_muted((uint16_t)track_color, muted);
+        int this_fill = dim_if_muted((uint16_t)graph_fill, muted);
+        canvas.fillRect(row_left, bar_y, graph_w, CHANNEL_ROW_BAR_H, this_track);
+        for (int x = 0; x < graph_w; x++) {
+            int sample_idx = CHANNEL_GRAPH_SAMPLES - graph_w + x;
+            int col_h = history[i][sample_idx] * CHANNEL_ROW_BAR_H / 100;
+            if (col_h <= 0)
+                continue;
+            canvas.drawFastVLine(row_left + x, baseline - col_h, col_h, this_fill);
+        }
+
+        // Mini vumeter: a small square box, vertical segments stacked
+        // bottom-up -- same segment style as draw_vu_meters, just far
+        // fewer/smaller and driven by one combined level instead of L/R.
+        const int box_x = row_left + graph_w + MINI_BOX_GAP;
+        const int seg_span = mini_box_side - (MINI_SEG_COUNT - 1) * MINI_SEG_GAP;
+        const int lit = (int)(lv * MINI_SEG_COUNT / 100.0f);
+        for (int s = 0; s < MINI_SEG_COUNT; s++) {
+            int64_t h_before = (int64_t)s * seg_span / MINI_SEG_COUNT;
+            int64_t h_after = (int64_t)(s + 1) * seg_span / MINI_SEG_COUNT;
+            int seg_height = (int)(h_after - h_before);
+            int sy = (int)(baseline - h_after) - s * MINI_SEG_GAP;
+            int col;
+            if (s < lit) {
+                float frac = (s + 1) / (float)MINI_SEG_COUNT;
+                col = vu_gradient_color(green, orange, red, green_max, orange_max, frac);
+            } else {
+                col = track_color;
+            }
+            col = dim_if_muted((uint16_t)col, muted);
+            canvas.fillRect(box_x, sy, mini_box_side, seg_height, col);
+        }
+
+        // metadata.names[i] has no guaranteed null terminator, same caveat as
+        // draw_vu_meters above. name_len is > 0 here -- the unassigned
+        // (empty-name) case already continue'd above.
+        char name_buf[CHANNEL_NAME_LEN + 1];
+        size_t name_len = strnlen(metadata.names[i], CHANNEL_NAME_LEN);
+        std::memcpy(name_buf, metadata.names[i], name_len);
+        name_buf[name_len] = '\0';
+
+        int volume = channels[i].volume;
+        std::string pct_str = std::to_string(volume) + "%";
+        int pct_w = canvas.textWidth(pct_str.c_str());
+        std::string display_name =
+            truncate_to_width(canvas, name_buf, row_w - pct_w - NAME_PCT_GAP);
+
+        int this_text_col = dim_if_muted((uint16_t)text_col, muted);
+        canvas.setTextColor(this_text_col);
+        canvas.setTextDatum(lgfx::textdatum_t::top_left);
+        canvas.drawString(display_name.c_str(), row_left, text_y);
+        canvas.setTextDatum(lgfx::textdatum_t::top_right);
+        canvas.drawString(pct_str.c_str(), row_right, text_y);
     }
 
     canvas.setTextDatum(lgfx::textdatum_t::top_left);
@@ -592,4 +835,160 @@ void GUI::draw_audio_waveform(lgfx::LGFX_Sprite &canvas, const Bounds &bounds)
     draw_label("PEAK " + std::to_string(peak_val), dark, 1.0f);
 
     canvas.setTextSize(1.0f);
+}
+
+// One-line status token per topbar item. MIXER_CHANNELS doubles as the
+// encoder count -- both are the device's 4 physical knobs.
+std::string GUI::topbar_item_text(uint8_t item, const levels_packet &levels,
+                                  const device_config_packet &device_config, bool is_woke_up,
+                                  int output_level)
+{
+    switch (item) {
+    case TOPBAR_ITEM_CONNECTION:
+        return is_woke_up ? "LINK" : "IDLE";
+
+    case TOPBAR_ITEM_ANY_MUTED:
+        for (int c = 0; c < MIXER_CHANNELS; c++) {
+            if (levels.channels[c].muted) {
+                return "MUTE";
+            }
+        }
+        return "-";
+
+    case TOPBAR_ITEM_CLIP_WARNING: {
+        constexpr int CLIP_THRESHOLD = 98;
+        for (int c = 0; c < MIXER_CHANNELS; c++) {
+            const channel_level &ch = levels.channels[c];
+            if (ch.left >= CLIP_THRESHOLD || ch.right >= CLIP_THRESHOLD) {
+                return "CLIP";
+            }
+        }
+        return "-";
+    }
+
+    case TOPBAR_ITEM_ACTIVE_CHANNELS: {
+        int count = 0;
+        for (int c = 0; c < MIXER_CHANNELS; c++) {
+            const channel_level &ch = levels.channels[c];
+            if (ch.volume > 0 && !ch.muted && (ch.left > 0 || ch.right > 0)) {
+                count++;
+            }
+        }
+        return std::to_string(count) + "CH";
+    }
+
+    case TOPBAR_ITEM_OUTPUT_LEVEL:
+        return std::to_string(output_level);
+
+    case TOPBAR_ITEM_LOUDEST_CHANNEL: {
+        int loudest = -1;
+        int loudest_level = 0;
+        for (int c = 0; c < MIXER_CHANNELS; c++) {
+            int level = levels.channels[c].left + levels.channels[c].right;
+            if (level > loudest_level) {
+                loudest_level = level;
+                loudest = c;
+            }
+        }
+        return loudest >= 0 ? "CH" + std::to_string(loudest + 1) : "-";
+    }
+
+    case TOPBAR_ITEM_UPTIME: {
+        int64_t seconds = esp_timer_get_time() / 1000000;
+        int hours = (int)(seconds / 3600);
+        int minutes = (int)((seconds % 3600) / 60);
+        return hours > 0 ? std::to_string(hours) + "h" + std::to_string(minutes) + "m"
+                        : std::to_string(minutes) + "m";
+    }
+
+    case TOPBAR_ITEM_FINE_STEP:
+        if (_config.encoder_btn_held != nullptr) {
+            for (int e = 0; e < MIXER_CHANNELS; e++) {
+                if (_config.encoder_btn_held[e].load(std::memory_order_relaxed)) {
+                    return "FINE";
+                }
+            }
+        }
+        return "-";
+
+    case TOPBAR_ITEM_MASTER_VOLUME:
+        return levels.master.muted ? "M MUT" : "M " + std::to_string(levels.master.volume) + "%";
+
+    case TOPBAR_ITEM_PROFILE_NAME: {
+        // No guaranteed null terminator, same caveat as metadata.names in
+        // draw_vu_meters -- bound the read explicitly.
+        size_t len = strnlen(device_config.active_profile_name, PROFILE_NAME_WIRE_LEN);
+        return len > 0 ? std::string(device_config.active_profile_name, len) : "-";
+    }
+
+    case TOPBAR_ITEM_SESSION_COUNT:
+        return std::to_string(levels.session_count) + " apps";
+
+    case TOPBAR_ITEM_CLOCK: {
+        if (levels.clock_hour == CLOCK_UNKNOWN || levels.clock_minute == CLOCK_UNKNOWN) {
+            return "--:--";
+        }
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%02u:%02u", levels.clock_hour, levels.clock_minute);
+        return std::string(buf);
+    }
+
+    default:
+        return "";
+    }
+}
+
+void GUI::draw_topbar(lgfx::LGFX_Sprite &canvas, const levels_packet &levels,
+                      const device_config_packet &device_config, bool is_woke_up,
+                      int output_level)
+{
+    bool any_enabled = false;
+    for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+        if (device_config.topbar_items[i] != TOPBAR_ITEM_NONE) {
+            any_enabled = true;
+            break;
+        }
+    }
+    if (!any_enabled) {
+        return;
+    }
+
+    // Same left/right margin as the rest of the UI (channel_column_width()
+    // etc.), not edge-to-edge -- the 3 cells split the space between those
+    // margins evenly.
+    const int w = canvas.width();
+    const int usable_w = w - 2 * PADDING;
+    const int cell_w = usable_w / TOPBAR_SLOT_COUNT;
+    const int text_y = 3;
+    constexpr int CELL_PADDING = 4;
+
+    canvas.setFont(&fonts::efontCN_12);
+    canvas.setTextSize(1.0f);
+    canvas.setTextColor(TFT_GRAY);
+
+    for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+        uint8_t item = device_config.topbar_items[i];
+        if (item == TOPBAR_ITEM_NONE || item >= TOPBAR_ITEM_COUNT) {
+            continue;
+        }
+        std::string text = topbar_item_text(item, levels, device_config, is_woke_up, output_level);
+        std::string truncated = truncate_to_width(canvas, text, cell_w - 2 * CELL_PADDING);
+
+        int cell_left = PADDING + i * cell_w;
+        if (i == 0) {
+            // First slot: left-aligned within its cell.
+            canvas.setTextDatum(lgfx::textdatum_t::top_left);
+            canvas.drawString(truncated.c_str(), cell_left + CELL_PADDING, text_y);
+        } else if (i == TOPBAR_SLOT_COUNT - 1) {
+            // Last slot: right-aligned within its cell.
+            canvas.setTextDatum(lgfx::textdatum_t::top_right);
+            canvas.drawString(truncated.c_str(), cell_left + cell_w - CELL_PADDING, text_y);
+        } else {
+            // Middle slot(s): centered within their cell.
+            canvas.setTextDatum(lgfx::textdatum_t::top_center);
+            canvas.drawString(truncated.c_str(), cell_left + cell_w / 2, text_y);
+        }
+    }
+
+    canvas.setTextDatum(lgfx::textdatum_t::top_left);
 }

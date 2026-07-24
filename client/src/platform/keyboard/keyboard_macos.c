@@ -8,29 +8,17 @@
 
 #include "platform/keyboard_inject.h"
 #include <ApplicationServices/ApplicationServices.h>
+#include <Carbon/Carbon.h>
+#include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <stdio.h>
 
+// Physical-position keycodes for keys with no associated character --
+// their position is what matters, not a layout-dependent glyph, so unlike
+// the printable keys below these don't need live layout resolution.
 static CGKeyCode keycode_for(macro_key_t key)
 {
     switch (key) {
-    case MACRO_KEY_A: return 0x00; case MACRO_KEY_B: return 0x0B;
-    case MACRO_KEY_C: return 0x08; case MACRO_KEY_D: return 0x02;
-    case MACRO_KEY_E: return 0x0E; case MACRO_KEY_F: return 0x03;
-    case MACRO_KEY_G: return 0x05; case MACRO_KEY_H: return 0x04;
-    case MACRO_KEY_I: return 0x22; case MACRO_KEY_J: return 0x26;
-    case MACRO_KEY_K: return 0x28; case MACRO_KEY_L: return 0x25;
-    case MACRO_KEY_M: return 0x2E; case MACRO_KEY_N: return 0x2D;
-    case MACRO_KEY_O: return 0x1F; case MACRO_KEY_P: return 0x23;
-    case MACRO_KEY_Q: return 0x0C; case MACRO_KEY_R: return 0x0F;
-    case MACRO_KEY_S: return 0x01; case MACRO_KEY_T: return 0x11;
-    case MACRO_KEY_U: return 0x20; case MACRO_KEY_V: return 0x09;
-    case MACRO_KEY_W: return 0x0D; case MACRO_KEY_X: return 0x07;
-    case MACRO_KEY_Y: return 0x10; case MACRO_KEY_Z: return 0x06;
-    case MACRO_KEY_0: return 0x1D; case MACRO_KEY_1: return 0x12;
-    case MACRO_KEY_2: return 0x13; case MACRO_KEY_3: return 0x14;
-    case MACRO_KEY_4: return 0x15; case MACRO_KEY_5: return 0x17;
-    case MACRO_KEY_6: return 0x16; case MACRO_KEY_7: return 0x1A;
-    case MACRO_KEY_8: return 0x1C; case MACRO_KEY_9: return 0x19;
     case MACRO_KEY_SPACE: return 0x31;
     case MACRO_KEY_ENTER: return 0x24;
     case MACRO_KEY_TAB: return 0x30;
@@ -47,21 +35,139 @@ static CGKeyCode keycode_for(macro_key_t key)
     case MACRO_KEY_F7: return 0x62; case MACRO_KEY_F8: return 0x64;
     case MACRO_KEY_F9: return 0x65; case MACRO_KEY_F10: return 0x6D;
     case MACRO_KEY_F11: return 0x67; case MACRO_KEY_F12: return 0x6F;
-    // ANSI (US) layout keycodes, same layout-independent-by-position caveat
-    // as A-Z/0-9 above.
-    case MACRO_KEY_PERIOD: return 0x2F;
-    case MACRO_KEY_COMMA: return 0x2B;
-    case MACRO_KEY_SLASH: return 0x2C;
-    case MACRO_KEY_SEMICOLON: return 0x29;
-    case MACRO_KEY_QUOTE: return 0x27;
-    case MACRO_KEY_MINUS: return 0x1B;
-    case MACRO_KEY_EQUAL: return 0x18;
-    case MACRO_KEY_LBRACKET: return 0x21;
-    case MACRO_KEY_RBRACKET: return 0x1E;
-    case MACRO_KEY_BACKSLASH: return 0x2A;
-    case MACRO_KEY_GRAVE: return 0x32;
     default: return 0xFFFF;
     }
+}
+
+// The literal character each printable macro_key_t represents. Resolved to
+// an actual CGKeyCode via char_keycode_lookup() below against the live
+// keyboard layout, rather than hardcoded ANSI-US physical-position codes --
+// on a non-US layout, a fixed physical position can be a totally different
+// character (e.g. what's "-" on US ANSI can be "/" elsewhere), which is
+// exactly the bug this replaces. Same idea as keyboard_windows.c's
+// char_for_punctuation()/VkKeyScanExW and keyboard_linux.c's
+// XKeysymToKeycode -- both already resolve against the live layout instead
+// of a fixed table.
+static char ascii_for_printable(macro_key_t key)
+{
+    if (key >= MACRO_KEY_A && key <= MACRO_KEY_Z) return (char)('a' + (key - MACRO_KEY_A));
+    if (key >= MACRO_KEY_0 && key <= MACRO_KEY_9) return (char)('0' + (key - MACRO_KEY_0));
+
+    switch (key) {
+    case MACRO_KEY_PERIOD: return '.';
+    case MACRO_KEY_COMMA: return ',';
+    case MACRO_KEY_SLASH: return '/';
+    case MACRO_KEY_SEMICOLON: return ';';
+    case MACRO_KEY_QUOTE: return '\'';
+    case MACRO_KEY_MINUS: return '-';
+    case MACRO_KEY_EQUAL: return '=';
+    case MACRO_KEY_LBRACKET: return '[';
+    case MACRO_KEY_RBRACKET: return ']';
+    case MACRO_KEY_BACKSLASH: return '\\';
+    case MACRO_KEY_GRAVE: return '`';
+    default: return 0;
+    }
+}
+
+// Finds which physical key (CGKeyCode), under the live keyboard layout,
+// produces `target`, and whether Shift is required to reach it. Mirrors
+// keyboard_windows.c's VkKeyScanExW-based resolve_key(): only Shift is
+// tried, not Option/AltGr-style combos, so a character that requires Option
+// on some layout won't resolve -- the same gap Windows already has.
+//
+// Must run on the main thread: the TIS calls below live in HIToolbox, which
+// asserts (SIGTRAP) if invoked off it. keyboard_inject_shortcut() itself is
+// called from device_link.c's background polling thread, not main -- see
+// char_keycode_lookup()'s dispatch_sync wrapper below.
+static bool char_keycode_lookup_on_main_thread(UniChar target, CGKeyCode *out_code, bool *out_shift)
+{
+    TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+    CFDataRef layout_data =
+        source ? (CFDataRef)TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) : NULL;
+
+    // A legacy KCHR-only input source has no Unicode layout data; fall back
+    // to the ASCII-capable layout, which Apple guarantees has it.
+    if (!layout_data) {
+        if (source) CFRelease(source);
+        source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+        layout_data =
+            source ? (CFDataRef)TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) : NULL;
+    }
+
+    if (!layout_data) {
+        if (source) CFRelease(source);
+        return false;
+    }
+
+    const UCKeyboardLayout *layout = (const UCKeyboardLayout *)CFDataGetBytePtr(layout_data);
+    bool found = false;
+
+    // shift=false across the whole range first, then shift=true -- checking
+    // shift first could report "Shift needed" for a key also reachable
+    // without it.
+    for (int shift = 0; !found && shift < 2; shift++) {
+        for (CGKeyCode code = 0; code < 128; code++) {
+            UInt32 dead_key_state = 0;
+            UniCharCount length = 0;
+            UniChar chars[4];
+            UInt32 modifier_key_state = shift ? (UInt32)(shiftKey >> 8) : 0;
+            OSStatus status =
+                UCKeyTranslate(layout, code, kUCKeyActionDown, modifier_key_state, LMGetKbdType(),
+                                kUCKeyTranslateNoDeadKeysBit, &dead_key_state,
+                                sizeof(chars) / sizeof(chars[0]), &length, chars);
+            if (status == noErr && length == 1 && chars[0] == target) {
+                *out_code = code;
+                *out_shift = shift != 0;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    CFRelease(source);
+    return found;
+}
+
+// Hops to the main thread if we're not already on it (the app's main thread
+// always has a Cocoa run loop spinning -- either webview's own or tray_macos.m's
+// [NSApp run] -- so this never stalls waiting for one to start; see main.c).
+// pthread_main_np() avoids a redundant hop -- and a same-thread dispatch_sync
+// deadlock -- when a macro happens to fire from the main thread itself.
+static bool char_keycode_lookup(UniChar target, CGKeyCode *out_code, bool *out_shift)
+{
+    if (pthread_main_np()) {
+        return char_keycode_lookup_on_main_thread(target, out_code, out_shift);
+    }
+
+    __block bool found = false;
+    __block CGKeyCode code = 0;
+    __block bool shift = false;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        found = char_keycode_lookup_on_main_thread(target, &code, &shift);
+    });
+    *out_code = code;
+    *out_shift = shift;
+    return found;
+}
+
+static bool resolve_key(macro_key_t key, uint32_t *modifiers, CGKeyCode *out_code)
+{
+    char ascii = ascii_for_printable(key);
+    if (ascii != 0) {
+        bool shift = false;
+        if (!char_keycode_lookup((UniChar)ascii, out_code, &shift)) {
+            return false;
+        }
+        if (shift) *modifiers |= MACRO_MOD_SHIFT;
+        return true;
+    }
+
+    CGKeyCode code = keycode_for(key);
+    if (code == 0xFFFF) {
+        return false;
+    }
+    *out_code = code;
+    return true;
 }
 
 static bool ensure_accessibility_permission(void)
@@ -87,9 +193,9 @@ static bool ensure_accessibility_permission(void)
 
 bool keyboard_inject_shortcut(uint32_t modifiers, macro_key_t key)
 {
-    CGKeyCode code = keycode_for(key);
-    if (code == 0xFFFF) {
-        fprintf(stderr, "keyboard: unsupported key %d\n", (int)key);
+    CGKeyCode code;
+    if (!resolve_key(key, &modifiers, &code)) {
+        fprintf(stderr, "keyboard: unsupported key %d on the current keyboard layout\n", (int)key);
         return false;
     }
 

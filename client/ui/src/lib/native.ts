@@ -3,7 +3,7 @@
 // webview_return(); failures are swallowed here (native side already logs
 // them to stderr) so callers don't need a .catch() at every call site.
 
-import { GUI_COMPONENT_COUNT, type KeystrokeStep, type TinypadState } from "@/types";
+import { GUI_COMPONENT_COUNT, TOPBAR_SLOT_COUNT, type KeystrokeStep, type TinypadState } from "@/types";
 
 declare global {
   interface Window {
@@ -14,6 +14,7 @@ declare global {
     native_set_macro: (...args: number[]) => Promise<boolean>;
     native_set_macro_label: (index: number, label: string) => Promise<boolean>;
     native_set_gui_layout: (...layout: number[]) => Promise<boolean>;
+    native_set_topbar_items: (...items: number[]) => Promise<boolean>;
     native_set_simulation_enabled: (enabled: number) => Promise<boolean>;
     native_set_simulated_level: (index: number, levelPercent: number) => Promise<boolean>;
     native_save_profile: () => Promise<boolean>;
@@ -72,6 +73,15 @@ export function setGuiLayout(layout: number[]): void {
     throw new Error(`setGuiLayout: expected ${GUI_COMPONENT_COUNT} entries, got ${layout.length}`);
   }
   void window.native_set_gui_layout(...layout).catch(ignoreRejection);
+}
+
+// items: TOPBAR_SLOT_COUNT TopbarItem ids, one per fixed topbar position;
+// TOPBAR_ITEM_NONE disables that position.
+export function setTopbarItems(items: number[]): void {
+  if (items.length !== TOPBAR_SLOT_COUNT) {
+    throw new Error(`setTopbarItems: expected ${TOPBAR_SLOT_COUNT} entries, got ${items.length}`);
+  }
+  void window.native_set_topbar_items(...items).catch(ignoreRejection);
 }
 
 // Swaps the mixer's audio source between real OS audio and audio_simulated's

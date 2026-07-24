@@ -15,14 +15,28 @@ interface MacroActionEditorProps {
   // Forwarded to KeystrokeEditor -- lets the parent dialog suppress its own
   // close-on-Escape while a keystroke recording is in progress.
   onKeystrokeRecordingChange?: (recording: boolean) => void;
+  // Overrides MacroActionType.None's label -- e.g. an encoder's rotate
+  // trigger doesn't literally do "nothing" when unbound, it falls back to
+  // adjusting volume (see device_link.c's apply_command()), so the picker
+  // should say that instead of a generic "None".
+  noneLabel?: string;
 }
 
 // The "what does this button do" half of a key/knob-button's config
 // dialog -- action type, plus whichever detail that type needs (a target
 // channel, or a keystroke sequence). Shared between switches (KeyButton)
 // and encoder buttons (KnobButton), which both bind to a macro_trigger_t.
-export function MacroActionEditor({ trigger, action, onKeystrokeRecordingChange }: MacroActionEditorProps) {
+export function MacroActionEditor({
+  trigger,
+  action,
+  onKeystrokeRecordingChange,
+  noneLabel,
+}: MacroActionEditorProps) {
   const targetSlot = Math.max(0, action.targetSlot);
+
+  function labelFor(type: MacroActionType): string {
+    return type === MacroActionType.None && noneLabel ? noneLabel : MACRO_ACTION_LABELS[type];
+  }
 
   function setType(type: MacroActionType) {
     setMacro(trigger, type, targetSlot, action.steps);
@@ -38,12 +52,12 @@ export function MacroActionEditor({ trigger, action, onKeystrokeRecordingChange 
     <div className="flex flex-col gap-2">
       <Select value={String(action.type)} onValueChange={(v) => setType(Number(v) as MacroActionType)}>
         <SelectTrigger size="sm" className="w-full text-xs">
-          <SelectValue>{MACRO_ACTION_LABELS[action.type]}</SelectValue>
+          <SelectValue>{labelFor(action.type)}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {Object.entries(MACRO_ACTION_LABELS).map(([value, label]) => (
+          {Object.entries(MACRO_ACTION_LABELS).map(([value]) => (
             <SelectItem key={value} value={value}>
-              {label}
+              {labelFor(Number(value) as MacroActionType)}
             </SelectItem>
           ))}
         </SelectContent>

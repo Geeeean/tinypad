@@ -110,21 +110,63 @@ export function parseKeystrokeSequence(text: string): ParsedKeystrokeSequence {
   return { steps, errors };
 }
 
+function rawStepParts(step: KeystrokeStep): string[] {
+  const modNames = MODIFIER_TEXT.filter(([bit]) => (step.modifiers & bit) !== 0).map(
+    ([, name]) => name,
+  );
+  const keyName =
+    step.key > 0 && step.key < MACRO_KEY_LABELS.length
+      ? MACRO_KEY_LABELS[step.key].toLowerCase()
+      : "";
+  return [...modNames, keyName].filter(Boolean);
+}
+
 // Inverse of parseKeystrokeSequence -- used to populate the text box from
 // steps the step-editor UI (or a loaded macro) already has, so both views
-// of the same sequence stay round-trippable.
+// of the same sequence stay round-trippable. Always spells a shifted
+// punctuation glyph as "shift+<base key>" (e.g. "shift+="), never as the
+// glyph itself (e.g. "+") -- the grammar can't accept "+" as a key token
+// since "+" is the modifier-joining character, so anything typed here must
+// stay parseable by parseKeystrokeToken. See formatKeystrokeStepParts below
+// for the read-only display variant that isn't bound by that constraint.
 export function stringifyKeystrokeSequence(steps: KeystrokeStep[]): string {
   return steps
-    .map((step) => {
-      const modNames = MODIFIER_TEXT.filter(([bit]) => (step.modifiers & bit) !== 0).map(
-        ([, name]) => name,
-      );
-      const keyName =
-        step.key > 0 && step.key < MACRO_KEY_LABELS.length
-          ? MACRO_KEY_LABELS[step.key].toLowerCase()
-          : "";
-      return [...modNames, keyName].filter(Boolean).join("+");
-    })
+    .map((step) => rawStepParts(step).join("+"))
     .filter(Boolean)
     .join(" ");
+}
+
+// The base punctuation key's shifted glyph, inverse of
+// keystrokeCapture.ts's SHIFTED_PUNCTUATION_ALIASES (macro_key_t has no
+// separate entry for it, e.g. no MACRO_KEY_PLUS -- "+" is stored as
+// MACRO_KEY_EQUAL with Shift set).
+const BASE_KEY_SHIFTED_GLYPH: Partial<Record<number, string>> = {
+  59: ">", // period
+  60: "<", // comma
+  61: "?", // slash
+  62: ":", // semicolon
+  63: '"', // quote
+  64: "_", // minus
+  65: "+", // equal
+  66: "{", // lbracket
+  67: "}", // rbracket
+  68: "|", // backslash
+  69: "~", // grave
+};
+
+// Read-only display form of a single step, as its individual modifier/key
+// parts (e.g. ["cmd", "+"], one per <Kbd> badge -- see KeystrokeEditor.tsx's
+// StepChips) rather than one joined string. Unlike stringifyKeystrokeSequence,
+// this renders a shifted punctuation glyph directly ("+" instead of "shift"
+// + "="), since it's never fed back through parseKeystrokeToken.
+export function formatKeystrokeStepParts(step: KeystrokeStep): string[] {
+  const shiftedGlyph =
+    (step.modifiers & MacroModifier.Shift) !== 0 ? BASE_KEY_SHIFTED_GLYPH[step.key] : undefined;
+  if (shiftedGlyph === undefined) {
+    return rawStepParts(step);
+  }
+  const modNames = MODIFIER_TEXT.filter(
+    ([bit]) => bit !== MacroModifier.Shift && (step.modifiers & bit) !== 0,
+  ).map(([, name]) => name);
+  return [...modNames, shiftedGlyph];
 }

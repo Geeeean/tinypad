@@ -1,9 +1,11 @@
 #pragma once
 
-// Configurable behavior for the 8 switches + 4 encoder buttons. Encoder
-// rotation (volume up/down) is wired directly to the assigned slot by
-// device_link and doesn't go through here -- this is only for discrete
-// "button pressed" actions.
+// Configurable behavior for the 8 switches, 4 encoder buttons, and 8
+// encoder rotation directions. Encoder rotation defaults to nudging the
+// assigned slot's volume (wired directly in device_link, not through here)
+// unless a macro is explicitly bound to that direction's
+// MACRO_TRIGGER_ENCODER_*_ROTATE_PLUS/MINUS trigger, in which case the
+// macro fires instead -- see device_link.c's apply_command().
 
 #include "platform/keyboard_inject.h"
 #include <stdbool.h>
@@ -54,6 +56,18 @@ typedef enum {
     MACRO_TRIGGER_ENCODER_2_BTN,
     MACRO_TRIGGER_ENCODER_3_BTN,
     MACRO_TRIGGER_ENCODER_4_BTN,
+    // Appended after the discrete-button triggers above -- never renumber,
+    // profile_store persists these as raw ints. Default (unbound,
+    // MACRO_ACTION_NONE) means "adjust volume as usual"; binding one of
+    // these makes that direction fire the macro instead.
+    MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS,
+    MACRO_TRIGGER_ENCODER_1_ROTATE_MINUS,
+    MACRO_TRIGGER_ENCODER_2_ROTATE_PLUS,
+    MACRO_TRIGGER_ENCODER_2_ROTATE_MINUS,
+    MACRO_TRIGGER_ENCODER_3_ROTATE_PLUS,
+    MACRO_TRIGGER_ENCODER_3_ROTATE_MINUS,
+    MACRO_TRIGGER_ENCODER_4_ROTATE_PLUS,
+    MACRO_TRIGGER_ENCODER_4_ROTATE_MINUS,
     MACRO_TRIGGER_COUNT,
 } macro_trigger_t;
 

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // Encoder turns adjust volume by this many percentage points per detent.
 #define ENCODER_VOLUME_STEP 5
@@ -103,50 +104,72 @@ static const char *command_name(uint8_t command)
     }
 }
 
-// Encoder plus/minus map directly to a volume nudge on the same-numbered
-// slot (0-indexed), bypassing the macro map entirely.
-static bool encoder_delta_for_command(uint8_t command, int *out_slot, int *out_delta)
+// Encoder plus/minus map to a volume nudge on the same-numbered slot
+// (0-indexed) *and* the matching MACRO_TRIGGER_ENCODER_*_ROTATE_PLUS/MINUS
+// trigger -- apply_command() only falls back to the volume nudge if that
+// trigger has no macro bound. The _FINE variants map to the same rotate
+// trigger as their non-fine counterpart: "fine" only affects the volume
+// delta size, a macro fire has no equivalent finer-grained version.
+static bool encoder_delta_for_command(uint8_t command, int *out_slot, int *out_delta,
+                                      macro_trigger_t *out_rotate_trigger)
 {
     switch (command) {
-    case PROTOCOL_CMD_ENCODER_1_PLUS: *out_slot = 0; *out_delta = ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_1_MINUS: *out_slot = 0; *out_delta = -ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_2_PLUS: *out_slot = 1; *out_delta = ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_2_MINUS: *out_slot = 1; *out_delta = -ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_3_PLUS: *out_slot = 2; *out_delta = ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_3_MINUS: *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_4_PLUS: *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_4_MINUS: *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP; return true;
-    case PROTOCOL_CMD_ENCODER_1_PLUS_FINE: *out_slot = 0; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_1_MINUS_FINE: *out_slot = 0; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_2_PLUS_FINE: *out_slot = 1; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_2_MINUS_FINE: *out_slot = 1; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_3_PLUS_FINE: *out_slot = 2; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_3_MINUS_FINE: *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_4_PLUS_FINE: *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP_FINE; return true;
-    case PROTOCOL_CMD_ENCODER_4_MINUS_FINE: *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP_FINE; return true;
+    case PROTOCOL_CMD_ENCODER_1_PLUS:
+        *out_slot = 0; *out_delta = ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_1_MINUS:
+        *out_slot = 0; *out_delta = -ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_1_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_2_PLUS:
+        *out_slot = 1; *out_delta = ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_2_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_2_MINUS:
+        *out_slot = 1; *out_delta = -ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_2_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_3_PLUS:
+        *out_slot = 2; *out_delta = ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_3_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_3_MINUS:
+        *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_3_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_4_PLUS:
+        *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_4_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_4_MINUS:
+        *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_4_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_1_PLUS_FINE:
+        *out_slot = 0; *out_delta = ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_1_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_1_MINUS_FINE:
+        *out_slot = 0; *out_delta = -ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_1_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_2_PLUS_FINE:
+        *out_slot = 1; *out_delta = ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_2_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_2_MINUS_FINE:
+        *out_slot = 1; *out_delta = -ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_2_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_3_PLUS_FINE:
+        *out_slot = 2; *out_delta = ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_3_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_3_MINUS_FINE:
+        *out_slot = 2; *out_delta = -ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_3_ROTATE_MINUS; return true;
+    case PROTOCOL_CMD_ENCODER_4_PLUS_FINE:
+        *out_slot = 3; *out_delta = ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_4_ROTATE_PLUS; return true;
+    case PROTOCOL_CMD_ENCODER_4_MINUS_FINE:
+        *out_slot = 3; *out_delta = -ENCODER_VOLUME_STEP_FINE;
+        *out_rotate_trigger = MACRO_TRIGGER_ENCODER_4_ROTATE_MINUS; return true;
     default: return false;
     }
 }
 
-static void apply_command(device_link_t *link, uint8_t command)
+// Shared by both discrete-button triggers and (when bound) encoder-rotation
+// triggers -- executes whatever action a trigger currently resolves to.
+static void run_macro_action(device_link_t *link, macro_action_t action)
 {
-    fprintf(stderr, "device: command received: %s (0x%02X)\n", command_name(command), command);
-
-    int slot, delta;
-    if (encoder_delta_for_command(command, &slot, &delta)) {
-        bool ok = mixer_state_adjust_slot_volume(link->mixer, slot, delta);
-        fprintf(stderr, "  -> adjust slot %d volume by %+d%% (%s)\n", slot, delta,
-                ok ? "ok" : "no session assigned to that slot");
-        return;
-    }
-
-    macro_trigger_t trigger;
-    if (!macro_trigger_from_command(command, &trigger)) {
-        fprintf(stderr, "  -> not a recognized trigger, ignored\n");
-        return;
-    }
-
-    macro_action_t action = macro_map_get(link->macros, trigger);
     switch (action.type) {
     case MACRO_ACTION_TOGGLE_MUTE_SLOT: {
         bool ok = mixer_state_toggle_slot_mute(link->mixer, action.target_slot);
@@ -178,6 +201,37 @@ static void apply_command(device_link_t *link, uint8_t command)
         fprintf(stderr, "  -> no macro bound to this trigger\n");
         break;
     }
+}
+
+static void apply_command(device_link_t *link, uint8_t command)
+{
+    fprintf(stderr, "device: command received: %s (0x%02X)\n", command_name(command), command);
+
+    int slot, delta;
+    macro_trigger_t rotate_trigger;
+    if (encoder_delta_for_command(command, &slot, &delta, &rotate_trigger)) {
+        macro_action_t action = macro_map_get(link->macros, rotate_trigger);
+        if (action.type == MACRO_ACTION_NONE) {
+            bool ok = mixer_state_adjust_slot_volume(link->mixer, slot, delta);
+            fprintf(stderr, "  -> adjust slot %d volume by %+d%% (%s)\n", slot, delta,
+                    ok ? "ok" : "no session assigned to that slot");
+        } else {
+            fprintf(stderr,
+                    "  -> macro bound to encoder %d rotation, running instead of volume adjust\n",
+                    slot);
+            run_macro_action(link, action);
+        }
+        return;
+    }
+
+    macro_trigger_t trigger;
+    if (!macro_trigger_from_command(command, &trigger)) {
+        fprintf(stderr, "  -> not a recognized trigger, ignored\n");
+        return;
+    }
+
+    macro_action_t action = macro_map_get(link->macros, trigger);
+    run_macro_action(link, action);
 }
 
 // Reads and decodes everything currently available. Returns false on a
@@ -219,6 +273,23 @@ static bool pump_incoming(device_link_t *link)
     return n != -1;
 }
 
+// Fills hour/minute with the host's current local wall-clock time, or
+// CLOCK_UNKNOWN for both if it can't be determined -- the device has no RTC
+// or network of its own, so this is the only source for the topbar's clock
+// item.
+static void get_wall_clock(uint8_t *hour, uint8_t *minute)
+{
+    time_t now = time(NULL);
+    struct tm local;
+#ifdef _WIN32
+    bool ok = localtime_s(&local, &now) == 0;
+#else
+    bool ok = localtime_r(&now, &local) != NULL;
+#endif
+    *hour = ok ? (uint8_t)local.tm_hour : CLOCK_UNKNOWN;
+    *minute = ok ? (uint8_t)local.tm_min : CLOCK_UNKNOWN;
+}
+
 // Writes `packet` only if it differs from the last snapshot sent (tracked
 // in *last_sent/*has_sent, which the caller owns) -- metadata and
 // device_config both change rarely, so this avoids retransmitting an
@@ -257,7 +328,10 @@ bool device_link_poll(device_link_t *link)
         return false;
     }
 
+    uint8_t clock_hour, clock_minute;
+    get_wall_clock(&clock_hour, &clock_minute);
+
     levels_packet levels;
-    mixer_state_build_levels_packet(link->mixer, &levels);
+    mixer_state_build_levels_packet(link->mixer, &levels, clock_hour, clock_minute);
     return serial_port_write(link->port, (const uint8_t *)&levels, sizeof(levels));
 }

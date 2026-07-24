@@ -149,6 +149,15 @@ static void build_state_json(ui_bridge_t *bridge, strbuf_t *sb)
         device_settings_get_macro_label(bridge->settings, i, label, sizeof(label));
         sb_append_json_string(sb, label);
     }
+    sb_appendf(sb, "],\"topbarItems\":[");
+    {
+        uint8_t topbar_items[TOPBAR_SLOT_COUNT];
+        device_settings_get_topbar_items(bridge->settings, topbar_items);
+        for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+            if (i) sb_appendf(sb, ",");
+            sb_appendf(sb, "%u", topbar_items[i]);
+        }
+    }
     sb_appendf(sb, "]},\"simulationEnabled\":%s", bridge->simulation_enabled ? "true" : "false");
 
     sb_appendf(sb, ",\"profiles\":[");
@@ -410,6 +419,26 @@ static void native_set_gui_layout(const char *id, const char *req, void *arg)
     webview_return(bridge->w, id, 0, ok ? "true" : "false");
 }
 
+// args: TOPBAR_SLOT_COUNT ids, one per fixed topbar position; TOPBAR_ITEM_NONE
+// disables that slot. device_settings_set_topbar_items normalizes, so an
+// out-of-range id here just gets dropped rather than rejecting the whole
+// call (unlike gui_layout, duplicates across slots are allowed).
+static void native_set_topbar_items(const char *id, const char *req, void *arg)
+{
+    ui_bridge_t *bridge = arg;
+    long args[TOPBAR_SLOT_COUNT];
+    bool ok = parse_int_args(req, args, TOPBAR_SLOT_COUNT) == TOPBAR_SLOT_COUNT;
+    if (ok) {
+        uint8_t items[TOPBAR_SLOT_COUNT];
+        for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+            items[i] = (uint8_t)args[i];
+        }
+        device_settings_set_topbar_items(bridge->settings, items);
+        bridge->profile_dirty = true;
+    }
+    webview_return(bridge->w, id, 0, ok ? "true" : "false");
+}
+
 // --- profile management --------------------------------------------------
 
 // Parses a `["<string>"]` request (a single string argument, no leading
@@ -602,6 +631,7 @@ ui_bridge_t *ui_bridge_create(mixer_state_t *mixer, macro_map_t *macros,
     webview_bind(bridge->w, "native_set_macro", native_set_macro, bridge);
     webview_bind(bridge->w, "native_set_macro_label", native_set_macro_label, bridge);
     webview_bind(bridge->w, "native_set_gui_layout", native_set_gui_layout, bridge);
+    webview_bind(bridge->w, "native_set_topbar_items", native_set_topbar_items, bridge);
     webview_bind(bridge->w, "native_set_simulation_enabled", native_set_simulation_enabled, bridge);
     webview_bind(bridge->w, "native_set_simulated_level", native_set_simulated_level, bridge);
     webview_bind(bridge->w, "native_save_profile", native_save_profile, bridge);

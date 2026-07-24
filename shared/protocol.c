@@ -63,13 +63,19 @@ bool protocol_parse_packet(uint8_t expected_type, const uint8_t *raw_buffer,
 }
 
 void protocol_build_levels_packet(levels_packet *out_packet,
-                                  const channel_level channels[MIXER_CHANNELS])
+                                  const channel_level channels[MIXER_CHANNELS],
+                                  const channel_level *master, uint8_t session_count,
+                                  uint8_t clock_hour, uint8_t clock_minute)
 {
     out_packet->hdr.header = PROTOCOL_START_BYTE;
     out_packet->hdr.type = PROTOCOL_PACKET_LEVELS;
     for (int i = 0; i < MIXER_CHANNELS; i++) {
         out_packet->channels[i] = channels[i];
     }
+    out_packet->master = *master;
+    out_packet->session_count = session_count;
+    out_packet->clock_hour = clock_hour;
+    out_packet->clock_minute = clock_minute;
     protocol_finalize_packet((uint8_t *)out_packet, sizeof(*out_packet));
 }
 
@@ -110,10 +116,21 @@ void protocol_normalize_gui_layout(uint8_t gui_layout[GUI_COMPONENT_COUNT])
     }
 }
 
+void protocol_normalize_topbar_items(uint8_t topbar_items[TOPBAR_SLOT_COUNT])
+{
+    for (int i = 0; i < TOPBAR_SLOT_COUNT; i++) {
+        if (topbar_items[i] != TOPBAR_ITEM_NONE && topbar_items[i] >= TOPBAR_ITEM_COUNT) {
+            topbar_items[i] = TOPBAR_ITEM_NONE;
+        }
+    }
+}
+
 void protocol_build_device_config_packet(
     device_config_packet *out_packet,
     const char macro_labels[MACRO_BUTTON_COUNT][MACRO_LABEL_LEN],
-    const uint8_t gui_layout[GUI_COMPONENT_COUNT])
+    const uint8_t gui_layout[GUI_COMPONENT_COUNT],
+    const uint8_t topbar_items[TOPBAR_SLOT_COUNT],
+    const char active_profile_name[PROFILE_NAME_WIRE_LEN])
 {
     out_packet->hdr.header = PROTOCOL_START_BYTE;
     out_packet->hdr.type = PROTOCOL_PACKET_DEVICE_CONFIG;
@@ -122,6 +139,9 @@ void protocol_build_device_config_packet(
     }
     memcpy(out_packet->gui_layout, gui_layout, sizeof(out_packet->gui_layout));
     protocol_normalize_gui_layout(out_packet->gui_layout);
+    memcpy(out_packet->topbar_items, topbar_items, sizeof(out_packet->topbar_items));
+    protocol_normalize_topbar_items(out_packet->topbar_items);
+    memcpy(out_packet->active_profile_name, active_profile_name, PROFILE_NAME_WIRE_LEN);
     protocol_finalize_packet((uint8_t *)out_packet, sizeof(*out_packet));
 }
 

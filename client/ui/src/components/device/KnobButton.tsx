@@ -12,7 +12,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Slider } from "@/components/ui/slider";
 import { MacroActionEditor } from "@/components/device/MacroActionEditor";
 import { assignSlot, clearSlot, setSlotVolume, toggleSlotMute } from "@/lib/native";
-import { MIXER_MASTER_SESSION_ID, type AudioSession, type MacroAction, type MixerSlot } from "@/types";
+import {
+  encoderRotateMinusTrigger,
+  encoderRotatePlusTrigger,
+  MIXER_MASTER_SESSION_ID,
+  type AudioSession,
+  type MacroAction,
+  type MixerSlot,
+} from "@/types";
 
 // Tailwind has no directional border *color* utility, and this needs just
 // one side worth (the whole ring, actually, but still a single custom
@@ -27,13 +34,25 @@ interface KnobButtonProps {
   slot: MixerSlot;
   sessions: AudioSession[];
   buttonAction: MacroAction; // the encoder's press action (trigger = 8 + index)
+  // Rotation defaults to adjusting this slot's volume (handled directly by
+  // firmware/device_link) unless one of these is bound to something other
+  // than MacroActionType.None, in which case that macro fires instead.
+  rotatePlusAction: MacroAction;
+  rotateMinusAction: MacroAction;
 }
 
 // One physical rotary encoder: turning it controls a channel's volume
 // (handled directly by firmware/device_link, not configurable here);
 // clicking it opens what channel it's assigned to and what pressing it
 // down does.
-export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonProps) {
+export function KnobButton({
+  index,
+  slot,
+  sessions,
+  buttonAction,
+  rotatePlusAction,
+  rotateMinusAction,
+}: KnobButtonProps) {
   const [open, setOpen] = useState(false);
   const [localVolume, setLocalVolume] = useState(slot.volume);
   const [dragging, setDragging] = useState(false);
@@ -148,6 +167,26 @@ export function KnobButton({ index, slot, sessions, buttonAction }: KnobButtonPr
               trigger={8 + index}
               action={buttonAction}
               onKeystrokeRecordingChange={setRecordingKeystroke}
+            />
+          </div>
+
+          <div className="flex flex-col gap-2 border-t pt-3">
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase">Rotate right</h3>
+            <MacroActionEditor
+              trigger={encoderRotatePlusTrigger(index)}
+              action={rotatePlusAction}
+              onKeystrokeRecordingChange={setRecordingKeystroke}
+              noneLabel="Increase volume"
+            />
+          </div>
+
+          <div className="flex flex-col gap-2 border-t pt-3">
+            <h3 className="text-xs font-semibold text-muted-foreground uppercase">Rotate left</h3>
+            <MacroActionEditor
+              trigger={encoderRotateMinusTrigger(index)}
+              action={rotateMinusAction}
+              onKeystrokeRecordingChange={setRecordingKeystroke}
+              noneLabel="Decrease volume"
             />
           </div>
         </DialogContent>

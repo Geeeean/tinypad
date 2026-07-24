@@ -43,6 +43,12 @@ static const char *SCHEMA_SQL =
     "  component_id INTEGER NOT NULL,"
     "  PRIMARY KEY (profile_id, position)"
     ");"
+    "CREATE TABLE IF NOT EXISTS profile_topbar_items ("
+    "  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,"
+    "  slot_index INTEGER NOT NULL,"
+    "  item_id INTEGER NOT NULL,"
+    "  PRIMARY KEY (profile_id, slot_index)"
+    ");"
     "CREATE TABLE IF NOT EXISTS profile_macros ("
     "  profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,"
     "  trigger_id INTEGER NOT NULL,"
@@ -186,6 +192,9 @@ bool profile_store_save_as(profile_store_t *store, const char *name, const macro
     bool ok = profile_store_save(store, new_id, macros, settings, mixer);
     if (ok) {
         set_active_id(store, new_id);
+        // So the new name reaches the wire immediately, without waiting for
+        // a reload to read it back from the profiles table.
+        device_settings_set_profile_name(settings, name);
         if (out_id) {
             *out_id = new_id;
         }
@@ -314,6 +323,7 @@ bool profile_store_save(profile_store_t *store, int64_t profile_id, const macro_
 
     bool ok = delete_profile_rows(store->db, "profile_macro_labels", profile_id) &&
              delete_profile_rows(store->db, "profile_gui_layout", profile_id) &&
+             delete_profile_rows(store->db, "profile_topbar_items", profile_id) &&
              delete_profile_rows(store->db, "profile_macros", profile_id); // cascades _steps
     if (mixer) {
         ok = ok && delete_profile_rows(store->db, "profile_slot_assignments", profile_id);
@@ -334,6 +344,15 @@ bool profile_store_save(profile_store_t *store, int64_t profile_id, const macro_
         int64_t values[3] = {profile_id, i, layout[i]};
         ok = exec_ints(store->db,
                        "INSERT INTO profile_gui_layout (profile_id, position, component_id) VALUES (?,?,?);",
+                       values, 3);
+    }
+
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT];
+    device_settings_get_topbar_items(settings, topbar_items);
+    for (int i = 0; i < TOPBAR_SLOT_COUNT && ok; i++) {
+        int64_t values[3] = {profile_id, i, topbar_items[i]};
+        ok = exec_ints(store->db,
+                       "INSERT INTO profile_topbar_items (profile_id, slot_index, item_id) VALUES (?,?,?);",
                        values, 3);
     }
 
@@ -420,6 +439,33 @@ bool profile_store_load(profile_store_t *store, int64_t profile_id, macro_map_t 
     }
     device_settings_set_gui_layout(settings, layout);
 
+    uint8_t topbar_items[TOPBAR_SLOT_COUNT];
+    memset(topbar_items, TOPBAR_ITEM_NONE, sizeof(topbar_items));
+    if (sqlite3_prepare_v2(store->db,
+                           "SELECT slot_index, item_id FROM profile_topbar_items WHERE profile_id = ?;",
+                           -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, profile_id);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int slot = sqlite3_column_int(stmt, 0);
+            int item = sqlite3_column_int(stmt, 1);
+            if (slot >= 0 && slot < TOPBAR_SLOT_COUNT) {
+                topbar_items[slot] = (uint8_t)item;
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+    device_settings_set_topbar_items(settings, topbar_items);
+
+    if (sqlite3_prepare_v2(store->db, "SELECT name FROM profiles WHERE id = ?;", -1, &stmt, NULL) ==
+        SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, profile_id);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *name = (const char *)sqlite3_column_text(stmt, 0);
+            device_settings_set_profile_name(settings, name ? name : "");
+        }
+        sqlite3_finalize(stmt);
+    }
+
     if (sqlite3_prepare_v2(store->db,
                            "SELECT trigger_id, action_type, target_slot FROM profile_macros WHERE profile_id = ?;",
                            -1, &stmt, NULL) == SQLITE_OK) {
@@ -464,7 +510,16 @@ bool profile_store_load(profile_store_t *store, int64_t profile_id, macro_map_t 
             while (sqlite3_step(stmt) == SQLITE_ROW) {
                 int slot = sqlite3_column_int(stmt, 0);
                 const char *name = (const char *)sqlite3_column_text(stmt, 1);
-                if (slot >= 0 && slot < MIXER_CHANNELS && name) {
+                if (slot < 0 || slot >= MIXER_CHANNELS || !name) {
+                    continue;
+                }
+                if (strcmp(name, MIXER_MASTER_SESSION_NAME) == 0) {
+                    // Master is never one of audio_backend's enumerated
+                    // sessions, so the generic name-based pending-reconnect
+                    // path below would never resolve for it -- assign it
+                    // directly instead, the same way the UI does.
+                    mixer_state_assign_slot(mixer, slot, MIXER_MASTER_SESSION_ID);
+                } else {
                     mixer_state_set_pending_assignment(mixer, slot, name);
                 }
             }

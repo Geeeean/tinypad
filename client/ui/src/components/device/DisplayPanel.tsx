@@ -27,6 +27,7 @@ const ALL_COMPONENTS: GuiComponent[] = [
   GuiComponent.VuMeters,
   GuiComponent.Waveform,
   GuiComponent.MacroGrid,
+  GuiComponent.ChannelRows,
 ];
 
 // Pads/truncates an enabled-id list (in draw order) out to the wire array

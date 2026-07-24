@@ -94,9 +94,10 @@ void InputManager::configure_gpio()
     }
 }
 
-void InputManager::init()
+void InputManager::init(std::atomic<bool> *btn_held_out)
 {
     ESP_LOGI(TAG, "Configuring input GPIOs...");
+    _shared_btn_held = btn_held_out;
     configure_gpio();
 }
 
@@ -125,6 +126,9 @@ void InputManager::prime_state()
 
         _encoder_btn_pressed[e] = (gpio_get_level(ENCODER_BTN_PINS[e]) == 0);
         _encoder_btn_debounce_count[e] = 0;
+        if (_shared_btn_held) {
+            _shared_btn_held[e].store(_encoder_btn_pressed[e], std::memory_order_relaxed);
+        }
     }
 }
 
@@ -255,6 +259,9 @@ void InputManager::process_encoder_btn_edge(int index, bool raw_pressed)
 
     _encoder_btn_debounce_count[index] = 0;
     _encoder_btn_pressed[index] = raw_pressed;
+    if (_shared_btn_held) {
+        _shared_btn_held[index].store(raw_pressed, std::memory_order_relaxed);
+    }
 
     if (_encoder_btn_pressed[index]) {
         // Press edge: start tracking whether this turns into a
